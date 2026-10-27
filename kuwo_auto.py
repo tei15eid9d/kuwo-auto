@@ -1662,7 +1662,7 @@ def get_accounts():
 # ---- 运行日志捕获 ----
 _LOG = []
 _LOG_LOCK = _th.Lock()
-_RUN = {"flag": False, "last": None, "next": None}
+_RUN = {"flag": False, "last": None, "next": None, "claim_flag": False, "next_claim": None}
 
 class _LogCap(io.StringIO):
     def write(self, s):
@@ -1680,6 +1680,65 @@ def run_worker():
             run_all_accounts()
     finally:
         _RUN["flag"] = False
+
+def claim_worker():
+    _RUN["claim_flag"] = True
+    try:
+        with _cl.redirect_stdout(_LogCap()):
+            run_claims_only()
+    finally:
+        _RUN["claim_flag"] = False
+
+def claim_loop():
+    # 整点补领循环: 每小时第 3 分钟自动补跑领奖类任务
+    # (开宝箱/时段宝箱/整点领金币)。全量任务运行期间自动跳过, 避免冲突。
+    while True:
+        now = _dt.datetime.now()
+        target = now.replace(minute=3, second=0, microsecond=0)
+        if target <= now:
+            target = target + _dt.timedelta(hours=1)
+        _RUN["next_claim"] = target.strftime("%m-%d %H:%M")
+        time.sleep(max(1, (target - now).total_seconds()))
+        if _RUN.get("flag") or _RUN.get("claim_flag"):
+            continue
+        _th.Thread(target=claim_worker, daemon=True).start()
+
+def run_claims_only(accounts=None):
+    # 轻量补领轮: 只做"到点领奖"类任务, 不重复刷签到/看视频等
+    print('\n⏰ [整点补领] 开始: 开宝箱 / 时段宝箱 / 整点领金币')
+    if accounts is None:
+        accounts = get_accounts()
+    if not accounts:
+        print('❌ 未读取到有效账号')
+        return
+    for i, account in enumerate(accounts, 1):
+        phone = account['phone']
+        password = account['password']
+        print('\n👤 补领账号 ' + str(i) + '/' + str(len(accounts)) + ': ' + str(phone))
+        result = login(phone, password)
+        if not result:
+            print('  ❌ 登录失败, 跳过')
+            continue
+        loginUid, loginSid, username, appUid, encrypted_dev_id = result
+        encrypted_phone = encrypt_phone(phone)
+        print('  【4】开宝箱:')
+        box = open_treasure_box(loginUid, loginSid, appUid, encrypted_dev_id, gold_num=20, verbose=False)
+        if box.get('success'):
+            print('    ✅ +' + str(box.get('obtain', 0)) + ' 金币')
+        else:
+            print('    ⏭️ ' + str(box.get('description', '未到时间')))
+        print('  【4.2】时段宝箱补领:')
+        run_box_renew_tasks(loginUid, loginSid, gold_num=30, verbose=True)
+        print('  【6】整点领金币:')
+        clock = clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, encrypted_phone, verbose=False)
+        if clock.get('success'):
+            if clock.get('done'):
+                print('    ⏭️ ' + str(clock.get('description', '已完成')))
+            else:
+                print('    ✅ +' + str(clock.get('obtain', 0)) + ' 金币')
+        else:
+            print('    ⏭️ ' + str(clock.get('description', '未到时间')))
+    print('\n✅ [整点补领] 本轮结束, 下一轮整点后自动再试')
 
 # ---- Web 面板 ----
 try:
@@ -1711,7 +1770,7 @@ table{width:100%%;border-collapse:collapse}td,th{border:1px solid #e5e7eb;paddin
 .hint{color:#666;font-size:13px}</style></head><body>
 <h1>酷我音乐自动任务 <span class="hint">(仅调用酷我官方接口)</span></h1>
 <div class="card">
-  <div>状态：%s ｜ 上次运行：%s ｜ 下次定时：%s</div>
+  <div>状态：%s ｜ 上次运行：%s ｜ 下次定时：%s ｜ 下次整点补领：%s</div>
   <div style="margin-top:10px">
     <button onclick="runNow()">立即运行全部</button>
     <button onclick="location.reload()">刷新</button>
@@ -1738,9 +1797,10 @@ fetch('/api/accounts',{method:'DELETE',headers:{'Content-Type':'application/json
 function loadLog(){fetch('/api/logs').then(r=>r.text()).then(t=>document.getElementById('log').textContent=t)}
 setInterval(loadLog,4000);loadLog();
 </script></body></html>""" % (
-            ("运行中" if _RUN["flag"] else "空闲"),
+            ("运行中" if _RUN["flag"] else ("补领中" if _RUN.get("claim_flag") else "空闲")),
             _RUN["last"] or "—",
             _RUN["next"] or "—",
+            _RUN.get("next_claim") or "—",
             rows,
         )
         return html
@@ -1818,6 +1878,7 @@ def main():
             print("❌ 缺少 flask，请 pip install flask")
             return
         _th.Thread(target=schedule_loop, daemon=True).start()
+        _th.Thread(target=claim_loop, daemon=True).start()
         cfg = load_config()
         host = (cfg.get("settings") or {}).get("web_host", "0.0.0.0")
         port = int((cfg.get("settings") or {}).get("web_port", 8080))
