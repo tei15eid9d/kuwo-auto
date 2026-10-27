@@ -5,7 +5,13 @@
     "web_host": "0.0.0.0",
     "web_port": 8080,
     "web_password": "",
-    "push": { "type": "none" }
+    "push": {
+      "type": "wxpusher",
+      "wxpusher": {
+        "app_token": "AT_你的应用Token",
+        "topic_ids": [48125]
+      }
+    }
   },
   "accounts": [
     { "phone": "13800000000", "password": "你的酷我账号密码" }

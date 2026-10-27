@@ -1223,6 +1223,107 @@ def push_plus_send(title, content, force=False):
         print('❌ PushPlus推送异常: ' + str(e))
         return False
 
+def _split_target_ids(value):
+    """把 48125 / "48125" / "1,2" / [1, '2'] 统一解析成 id 列表"""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        raw = [x for x in str(value).replace('，', ',').replace(';', ',').split(',')]
+    out = []
+    for x in raw:
+        s = str(x).strip()
+        if not s:
+            continue
+        try:
+            out.append(int(s))
+        except ValueError:
+            out.append(s)  # UID 是字符串, 原样保留
+    return out
+
+
+def wxpusher_send(title, content, force=False, cfg=None):
+    """通过 WxPusher 推送消息(标准推送)。
+
+    重要: appToken 必须与 topicIds 属于【同一个应用】,
+    否则返回 code=1001「你没有权限给topic【xxx】发送消息」。
+    —— 主题(Topic)隶属于应用, 用 A 应用的 token 推 B 应用的主题会被服务端拒绝。
+    """
+    if cfg is None:
+        try:
+            cfg = ((load_config().get('settings') or {}).get('push') or {}).get('wxpusher') or {}
+        except Exception:
+            cfg = {}
+    app_token = (os.getenv('WXPUSHER_APP_TOKEN') or cfg.get('app_token') or '').strip()
+    topic_ids = _split_target_ids(os.getenv('WXPUSHER_TOPIC_IDS') or cfg.get('topic_ids'))
+    uids = _split_target_ids(os.getenv('WXPUSHER_UIDS') or cfg.get('uids'))
+
+    if not app_token:
+        print('⚠️ 未配置 WxPusher appToken，跳过推送')
+        return False
+    if not topic_ids and not uids:
+        print('⚠️ 未配置 WxPusher 推送目标(topic_ids 或 uids)，跳过推送')
+        return False
+
+    payload = {
+        'appToken': app_token,
+        'content': content,
+        'summary': str(title)[:100],
+        'contentType': 1,
+        'verifyPayType': 0,
+    }
+    if topic_ids:
+        payload['topicIds'] = topic_ids
+    if uids:
+        payload['uids'] = uids
+
+    try:
+        resp = requests.post('https://wxpusher.zjiecode.com/api/send/message',
+                             json=payload, timeout=15)
+        result = resp.json()
+        if result.get('code') == 1000:
+            # 逐个目标核对, topic 未授权时这里是 1001
+            failed = []
+            for d in (result.get('data') or []):
+                if d.get('code') != 1000:
+                    failed.append('%s: %s' % (d.get('topicId') or d.get('uid'), d.get('status')))
+            if failed:
+                print('❌ WxPusher推送部分失败:')
+                for f in failed:
+                    print('   ' + f)
+                return False
+            print('✅ WxPusher推送成功')
+            return True
+        print('❌ WxPusher推送失败: ' + str(result.get('msg', '未知错误')))
+        return False
+    except Exception as e:
+        print('❌ WxPusher推送异常: ' + str(e))
+        return False
+
+
+def push_notify(title, content, force=False):
+    """统一推送入口: 按 settings.push.type 选择渠道(wxpusher / pushplus / none)"""
+    ptype = 'none'
+    pcfg = {}
+    try:
+        st = (load_config().get('settings') or {}).get('push') or {}
+        ptype = (os.getenv('PUSH_TYPE') or st.get('type') or 'none')
+        pcfg = st
+    except Exception:
+        pass
+    ptype = str(ptype).strip().lower()
+    if ptype in ('none', '', 'off', 'false'):
+        print('⏭️ 未启用推送（settings.push.type = none）')
+        return False
+    if ptype == 'wxpusher':
+        return wxpusher_send(title, content, force, pcfg.get('wxpusher') or {})
+    if ptype in ('pushplus', 'push_plus'):
+        return push_plus_send(title, content, force)
+    print('⚠️ 未知的推送类型: ' + str(ptype))
+    return False
+
+
 def should_push():
     """判断是否应该推送（12:00-12:15 和 23:55-23:59 窗口推送，或设置FORCE_PUSH=1强制推送）"""
     # 支持强制推送：设置环境变量 FORCE_PUSH=1 即可忽略时间限制
@@ -1468,7 +1569,7 @@ def run_all_accounts(accounts=None):
     
         # 仅在12点推送统计结果
         if should_push() and account_gold_stats:
-            print('\n📤 正在推送金币统计到PushPlus...')
+            print('\n📤 正在推送金币统计...')
             now = datetime.now()
             title = f'酷我音乐金币统计 {now.strftime("%Y-%m-%d")}'
         
@@ -1504,7 +1605,7 @@ def run_all_accounts(accounts=None):
                 content_lines.append(f'🌟 当天累计获得: +{daily_data["total_gold"]}')
         
             content = '\n'.join(content_lines)
-            push_plus_send(title, content)
+            push_notify(title, content)
 
     # 当前脚本来自于 http://script.345yun.cn 脚本库下载！
     # 当前脚本来自于 http://2.345yun.cn 脚本库下载！

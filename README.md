@@ -54,6 +54,52 @@ cp config.example.json config.json   # 填入你的手机号与密码
 ```
 账号也支持环境变量：`export kwyy="13800000000#密码&13900000000#密码2"`
 
+## 消息推送（WxPusher / PushPlus）
+
+每日金币统计会按**时间窗口**（12:00–12:15、23:55–23:59）自动推送，也可以用
+`FORCE_PUSH=1` 强制推送（适合测试）。
+
+### WxPusher（推荐，微信直接收）
+
+```json
+{
+  "settings": {
+    "push": {
+      "type": "wxpusher",
+      "wxpusher": {
+        "app_token": "AT_你的应用Token",
+        "topic_ids": [48125]
+      }
+    }
+  }
+}
+```
+
+也可用环境变量：`PUSH_TYPE=wxpusher`、`WXPUSHER_APP_TOKEN=AT_xxx`、`WXPUSHER_TOPIC_IDS=48125`。
+
+> ⚠️ **最常见的坑：appToken 和主题必须属于同一个应用。**
+> 主题（Topic）是隶属于应用的，用 A 应用的 token 去推 B 应用的主题，服务端会返回：
+> `code=1001 你没有权限给topic【xxx】发送消息`
+>
+> 排查方法：到 [WxPusher 后台](https://wxpusher.zjiecode.com/admin/) 打开**你自己的应用**，
+> 在「主题管理」里复制该应用名下的主题 ID，和这个应用的 appToken 配套使用。
+>
+> 如果你只有主题 ID 却没有它的 token，最省事的办法是改用**极简推送（SPT）**：
+> 微信扫码拿 SPT，消息只发给你自己，无需创建应用、也不用配对 token 与 topic。
+
+### PushPlus
+
+```json
+{ "settings": { "push": { "type": "pushplus" } } }
+```
+配合环境变量 `PUSH_PLUS_TOKEN=你的token`。
+
+### 关闭推送
+
+```json
+{ "settings": { "push": { "type": "none" } } }
+```
+
 ## 运行
 ```bash
 # 1) Web 面板 + 每日定时（推荐服务器）
