@@ -1,584 +1,1819 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# 当前脚本来自于 http://script.345yun.cn 脚本库下载！
+# 当前脚本来自于 http://2.345yun.cn 脚本库下载！
+# 当前脚本来自于 http://2.345yun.cc 脚本库下载！
+# 脚本库官方QQ群1群: 429274456
+# 脚本库官方QQ群2群: 1077801222
+# 脚本库官方QQ群3群: 433030897
+# 脚本库中的所有脚本文件均来自热心网友上传和互联网收集。
+# 脚本库仅提供文件上传和下载服务，不提供脚本文件的审核。
+# 您在使用脚本库下载的脚本时自行检查判断风险。
+# 所涉及到的 账号安全、数据泄露、设备故障、软件违规封禁、财产损失等问题及法律风险，与脚本库无关！均由开发者、上传者、使用者自行承担。
+
 """
-酷我音乐自动签到 / 金币任务 —— 去毒 · 服务器 · Web 面板版
-========================================================
-本程序从你购买的加密 EXE 中还原出酷我官方任务逻辑，并做减法：
-  ✓ 仅调用酷我官方接口（*.kuwo.cn），无任何第三方外发
-  ✗ 已物理移除所有发往第三方平台的请求（原 EXE 中的上报地址）
-  ✗ 不实现自动提现（需手机验证码 + 资金风险，请到官方 App 自提）
-
-功能对照原闲鱼 EXE：
-  登录 / 每日签到(看广告金币) / 创意视频·听歌 / 每日音乐 /
-  开宝箱 / 抽奖(免费·看视频) / 免费听歌开关 / 多账号 /
-  内置定时任务(默认每天 09:00) / Web 面板 / 可选推送
-
-【网络行为（全部为酷我官方域名，绝无其他）】
-  - ar.i.kuwo.cn           登录
-  - integralapi.kuwo.cn    签到 / 看广告 / 开宝箱 / 抽奖 / 每日音乐
-  - wapi.kuwo.cn           免费听歌开关
-
-【运行】
-  pip install flask requests
-  python3 kuwo_auto.py --server            # 启动 Web 面板 + 每日定时
-  python3 kuwo_auto.py --once              # 立即执行一次后退出
-  python3 kuwo_auto.py --loop              # 常驻，每 2 小时一轮（旧模式）
-
-【参数获取】
-  安卓酷我 App 内用抓包工具抓取 ar.i.kuwo.cn/US_NEW/kuwo/login_kw 请求，取：
-    appuid / devid / q(登录票据) / phone(绑定手机号)
+使用说明:
+1. 环境变量使用 `kwyy`。
+2. 单账号格式: 手机号#密码
+3. 备注格式: 备注#手机号#密码
+4. 多账号用 `&` 分隔:
+   kwyy="备注#1手机号1#密码1&备注2#手机号2#密码2"
 """
 
 import os
-import re
-import sys
-import json
-import time
+import base64
 import random
-import datetime
-import logging
-import threading
-
+import string
+import uuid
+import json
+from urllib.parse import quote
+import time
+import re
 import requests
+import hashlib
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import urllib3
+from datetime import datetime
 
-# ===================== 路径 =====================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.environ.get("KUWO_CONFIG", os.path.join(BASE_DIR, "config.json"))
-LOG_PATH = os.path.join(BASE_DIR, "kuwo_sign.log")
-STATE_PATH = os.path.join(BASE_DIR, "kuwo_state.json")
-HISTORY_PATH = os.path.join(BASE_DIR, "kuwo_history.json")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ===================== 日志（仅写文件+控制台，不外发） =====================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
-log = logging.getLogger("kuwo")
+SIGN_BASE = 'https://integralapi.kuwo.cn/api/v1/online/sign'
+URL_NEW_USER_SIGN_LIST = SIGN_BASE + '/v1/earningSignIn/newUserSignList'
+URL_USER_ASSET = SIGN_BASE + '/v1/earningSignIn/earningUserSignList'
+URL_NEW_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/newDoListen'
+URL_EVERYDAY_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/everydaymusic/doListen'
+URL_BOX_RENEW = SIGN_BASE + '/new/boxRenew'
+URL_NEW_BOX_LIST = SIGN_BASE + '/new/newBoxList'
+URL_NEW_BOX_FINISH = SIGN_BASE + '/new/newBoxFinish'
+FREEMIUM_SWITCH_URL = 'https://wapi.kuwo.cn/openapi/v1/user/freemium/h5/switches'
 
-# ===================== 默认设置 =====================
-DEFAULT_SETTINGS = {
-    "schedule": "09:00",       # 每天运行时间（daily 模式）
-    "interval_mode": "daily",  # daily / interval
-    "interval_minutes": 120,   # interval 模式下的间隔
-    "min_delay": 15,           # 任务间随机延时下限（秒）
-    "max_delay": 25,           # 上限
-    "max_retry": 1,            # 单任务失败重试次数
-    "web_host": "0.0.0.0",
-    "web_port": 8080,
-    "web_password": "",        # 建议设置，API/页面统一用 ?token= 或 X-Token
-    "push": {                  # 可选推送，仅发往你自己的地址
-        "type": "none",        # none / webhook / bark / tg
-        "url": "",
-        "token": "",
-    },
-}
+DONE_KEYWORDS = [
+    '今天已完成任务',
+    '已完成',
+    '已领取',
+    '已签到',
+    '已达到当日观看额外视频次数',
+    '已达',
+    '上限',
+    '次数用完',
+    '免费次数用完了',
+    '视频次数用完了',
+]
 
-# 运行时可变设置 / 账号
-SETTINGS = dict(DEFAULT_SETTINGS)
-ACCOUNTS = []
-HISTORY = {}          # phone -> {last_run, status, username, coins, tasks:[...]}
-run_lock = threading.Lock()
-stop_event = threading.Event()
+static_c = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432, 67108864, 134217728, 268435456, 536870912, 1073741824, 2147483648, 4294967296, 8589934592, 17179869184, 34359738368, 68719476736, 137438953472, 274877906944, 549755813888, 1099511627776, 2199023255552, 4398046511104, 8796093022208, 17592186044416, 35184372088832, 70368744177664, 140737488355328, 281474976710656, 562949953421312, 1125899906842624, 2251799813685248, 4503599627370496, 9007199254740992, 18014398509481984, 36028797018963968, 72057594037927936, 144115188075855872, 288230376151711744, 576460752303423488, 1152921504606846976, 2305843009213693952, 4611686018427387904, -9223372036854775808]
+static_i = [56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3]
+static_e = [31, 0, 1, 2, 3, 4, -1, -1, 3, 4, 5, 6, 7, 8, -1, -1, 7, 8, 9, 10, 11, 12, -1, -1, 11, 12, 13, 14, 15, 16, -1, -1, 15, 16, 17, 18, 19, 20, -1, -1, 19, 20, 21, 22, 23, 24, -1, -1, 23, 24, 25, 26, 27, 28, -1, -1, 27, 28, 29, 30, 31, 30, -1, -1]
+static_l = [0, 1048577, 3145731]
+static_g = [15, 6, 19, 20, 28, 11, 27, 16, 0, 14, 22, 25, 4, 17, 30, 9, 1, 7, 23, 13, 31, 26, 2, 8, 18, 12, 29, 5, 21, 10, 3, 24]
+static_f = [[14, 4, 3, 15, 2, 13, 5, 3, 13, 14, 6, 9, 11, 2, 0, 5, 4, 1, 10, 12, 15, 6, 9, 10, 1, 8, 12, 7, 8, 11, 7, 0, 0, 15, 10, 5, 14, 4, 9, 10, 7, 8, 12, 3, 13, 1, 3, 6, 15, 12, 6, 11, 2, 9, 5, 0, 4, 2, 11, 14, 1, 7, 8, 13], [15, 0, 9, 5, 6, 10, 12, 9, 8, 7, 2, 12, 3, 13, 5, 2, 1, 14, 7, 8, 11, 4, 0, 3, 14, 11, 13, 6, 4, 1, 10, 15, 3, 13, 12, 11, 15, 3, 6, 0, 4, 10, 1, 7, 8, 4, 11, 14, 13, 8, 0, 6, 2, 15, 9, 5, 7, 1, 10, 12, 14, 2, 5, 9], [10, 13, 1, 11, 6, 8, 11, 5, 9, 4, 12, 2, 15, 3, 2, 14, 0, 6, 13, 1, 3, 15, 4, 10, 14, 9, 7, 12, 5, 0, 8, 7, 13, 1, 2, 4, 3, 6, 12, 11, 0, 13, 5, 14, 6, 8, 15, 2, 7, 10, 8, 15, 4, 9, 11, 5, 9, 0, 14, 3, 10, 7, 1, 12], [7, 10, 1, 15, 0, 12, 11, 5, 14, 9, 8, 3, 9, 7, 4, 8, 13, 6, 2, 1, 6, 11, 12, 2, 3, 0, 5, 14, 10, 13, 15, 4, 13, 3, 4, 9, 6, 10, 1, 12, 11, 0, 2, 5, 0, 13, 14, 2, 8, 15, 7, 4, 15, 1, 10, 7, 5, 6, 12, 11, 3, 8, 9, 14], [2, 4, 8, 15, 7, 10, 13, 6, 4, 1, 3, 12, 11, 7, 14, 0, 12, 2, 5, 9, 10, 13, 0, 3, 1, 11, 15, 5, 6, 8, 9, 14, 14, 11, 5, 6, 4, 1, 3, 10, 2, 12, 15, 0, 13, 2, 8, 5, 11, 8, 0, 15, 7, 14, 9, 4, 12, 7, 10, 9, 1, 13, 6, 3], [12, 9, 0, 7, 9, 2, 14, 1, 10, 15, 3, 4, 6, 12, 5, 11, 1, 14, 13, 0, 2, 8, 7, 13, 15, 5, 4, 10, 8, 3, 11, 6, 10, 4, 6, 11, 7, 9, 0, 6, 4, 2, 13, 1, 9, 15, 3, 8, 15, 3, 1, 14, 12, 5, 11, 0, 2, 12, 14, 7, 5, 10, 8, 13], [4, 1, 3, 10, 15, 12, 5, 0, 2, 11, 9, 6, 8, 7, 6, 9, 11, 4, 12, 15, 0, 3, 10, 5, 14, 13, 7, 8, 13, 14, 1, 2, 13, 6, 14, 9, 4, 1, 2, 14, 11, 13, 5, 0, 1, 10, 8, 3, 0, 11, 3, 5, 9, 4, 15, 2, 7, 8, 12, 15, 10, 7, 6, 12], [13, 7, 10, 0, 6, 9, 5, 15, 8, 4, 3, 10, 11, 14, 12, 5, 2, 11, 9, 6, 15, 12, 0, 3, 4, 1, 14, 13, 1, 2, 7, 8, 1, 2, 12, 15, 10, 4, 0, 3, 13, 14, 6, 9, 7, 8, 9, 6, 15, 1, 5, 12, 3, 10, 14, 5, 8, 7, 11, 0, 4, 13, 2, 11]]
+static_h = [39, 7, 47, 15, 55, 23, 63, 31, 38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29, 36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27, 34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25, 32, 0, 40, 8, 48, 16, 56, 24]
+static_d = [57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7, 56, 48, 40, 32, 24, 16, 8, 0, 58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6]
+static_k = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
+static_j = [13, 16, 10, 23, 0, 4, -1, -1, 2, 27, 14, 5, 20, 9, -1, -1, 22, 18, 11, 3, 25, 7, -1, -1, 15, 6, 26, 19, 12, 1, -1, -1, 40, 51, 30, 36, 46, 54, -1, -1, 29, 39, 50, 44, 32, 47, -1, -1, 43, 48, 38, 55, 33, 52, -1, -1, 45, 41, 49, 35, 28, 31, -1, -1]
 
+def func_a1(iArr, i2, j2):
+    j3 = 0
+    for i3 in range(i2):
+        if iArr[i3] >= 0:
+            jArr = static_c
+            if (jArr[iArr[i3]] & j2) != 0:
+                j3 |= jArr[i3]
+    return j3
 
-# ===================== 配置读写 =====================
-def load_config():
-    global SETTINGS, ACCOUNTS
-    if not os.path.exists(CONFIG_PATH):
-        raise SystemExit(
-            "未找到 config.json，请参考 config.example.json 创建：\n"
-            '{"accounts":[{"appuid":"..","devid":"..","q":"..","phone":".."}]}'
-        )
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    SETTINGS.update({k: v for k, v in cfg.get("settings", {}).items() if k in DEFAULT_SETTINGS})
-    if "push" in cfg.get("settings", {}):
-        SETTINGS["push"].update(cfg["settings"]["push"])
-    ACCOUNTS = cfg.get("accounts", [])
-    if not ACCOUNTS:
-        log.warning("config.json 中未配置任何 accounts")
+def func_a2(j2, jArr, i2):
+    a2 = func_a1(static_i, 56, j2)
+    for i3 in range(16):
+        jArr2 = static_l
+        iArr = static_k
+        a2 = ((a2 & ~jArr2[iArr[i3]]) >> iArr[i3]) | ((jArr2[iArr[i3]] & a2) << (28 - iArr[i3]))
+        jArr[i3] = func_a1(static_j, 64, a2)
+    if i2 == 1:
+        for i4 in range(8):
+            j3 = jArr[i4]
+            i5 = 15 - i4
+            jArr[i4] = jArr[i5]
+            jArr[i5] = j3
 
+def func_a3(jArr, j2):
+    p = [0] * 2
+    q = [0] * 8
+    m = func_a1(static_d, 64, j2)
+    iArr = p
+    j3 = m
+    iArr[0] = int(j3 & 4294967295)
+    iArr[1] = int((j3 & -4294967296) >> 32)
+    for i2 in range(16):
+        o = iArr[1]
+        o = func_a1(static_e, 64, o)
+        o ^= jArr[i2]
+        for i3 in range(8):
+            q[i3] = int((o >> (i3 * 8)) & 255)
+        r = 0
+        i4 = 7
+        while True:
+            t = i4
+            i5 = t
+            if i5 >= 0:
+                i6 = r
+                i6 <<= 4
+                if i6 > 2147483647:
+                    i6 = -4294967296 + i6
+                i6 |= static_f[i5][q[i5]]
+                r = i6
+                i4 = i5 - 1
+            else:
+                break
+        o = r
+        o = func_a1(static_g, 32, o)
+        iArr2 = p
+        n = iArr2[0]
+        iArr2[0] = iArr2[1]
+        xor_val = n ^ o
+        if -2147483648 < xor_val < 2147483647:
+            iArr2[1] = int(xor_val)
+            continue
+        if xor_val >= 2147483647:
+            iArr2[1] = xor_val - 4294967296
+        else:
+            iArr2[1] = xor_val + 4294967296
+    iArr3 = p
+    s = iArr3[0]
+    iArr3[0] = iArr3[1]
+    iArr3[1] = s
+    m = ((iArr3[1] << 32) & -4294967296) | (4294967295 & iArr3[0])
+    m = func_a1(static_h, 64, m)
+    return m
 
-def save_config():
-    """把当前 ACCOUNTS / SETTINGS 写回 config.json（Web 面板增删账号用）。"""
-    cfg = {"settings": SETTINGS, "accounts": ACCOUNTS}
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, CONFIG_PATH)
+def generate_q(bArr, bArr2):
+    length = len(bArr)
+    jArr = [0] * 16
+    j2 = 0
+    j3 = 0
+    for i3 in range(8):
+        j3 |= bArr2[i3] << (i3 * 8)
+    func_a2(j3, jArr, 0)
+    i4 = length // 8
+    jArr2 = [0] * i4
+    for i5 in range(i4):
+        for i6 in range(8):
+            jArr2[i5] = jArr2[i5] | ((bArr[i5 * 8 + i6] & 255) << (i6 * 8))
+    jArr3 = [0] * (((i4 + 1) * 8 + 1) // 8)
+    for i7 in range(i4):
+        jArr3[i7] = func_a3(jArr, jArr2[i7])
+    i8 = length % 8
+    i9 = i4 * 8
+    i10 = length - i9
+    r12 = [None] * i10
+    r12[0:i10] = bArr[i9:i9 + i10]
+    for i11 in range(i8):
+        j2 |= (r12[i11] & 255) << (i11 * 8)
+    jArr3[i4] = func_a3(jArr, j2)
+    bArr3 = [None] * (len(jArr3) * 8)
+    i12 = 0
+    i13 = 0
+    while i12 < len(jArr3):
+        i14 = i13
+        for i15 in range(8):
+            bArr3[i14] = 255 & (jArr3[i12] >> (i15 * 8))
+            i14 += 1
+        i12 += 1
+        i13 = i14
+    return base64.b64encode(bytearray(bArr3)).decode()
 
+def create_sx():
+    timestamp = int(time.time() * 1000)
+    combined_string = str(timestamp) + '12345678'
+    result = combined_string[:8]
+    return result
 
-def load_history():
-    global HISTORY
-    if os.path.exists(HISTORY_PATH):
-        try:
-            with open(HISTORY_PATH, "r", encoding="utf-8") as f:
-                HISTORY = json.load(f)
-        except Exception:
-            HISTORY = {}
+def encrypt_devid(dev_id):
+    padded_id = dev_id.ljust(16, '0')[:16]
+    return base64.b64encode(padded_id.encode()).decode()
 
+def get_q(username, password):
+    dev_id = ''.join([random.choice(string.digits) for _ in range(10)])
+    dev_name = '安卓设备'
+    devType = 'arr'
+    data = f"username={quote(username)}&password={quote(base64.b64encode(password.encode()).decode())}&dev_id={dev_id}&user={str(uuid.uuid4()).replace('-', '')}&dev_name={quote(dev_name)}&urlencode=0&src=kwplayer_ar11.1.4.1_40.apk&devResolution=720*1080&&from=android&devType={devType}&sx={create_sx()}&version=11.1.4.1"
+    q_value = generate_q(data.encode('UTF-8'), 'kwks&@69'.encode('UTF-8'))
+    encrypted_dev_id = encrypt_devid(dev_id)
+    return q_value, encrypted_dev_id
 
-def save_history():
-    try:
-        with open(HISTORY_PATH, "w", encoding="utf-8") as f:
-            json.dump(HISTORY, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log.error("写入历史失败: %s", e)
+def encrypt_phone(phone):
+    key = b'ysiVkLJHHnvMWCHq'
+    iv = b'ichYooX+Mb1gRetP'
+    if isinstance(phone, str):
+        phone = phone.encode('utf-8')
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    padded_plaintext = pad(phone, AES.block_size)
+    ciphertext = cipher.encrypt(padded_plaintext)
+    ciphertext_base64 = base64.b64encode(ciphertext).decode('utf-8')
+    return ciphertext_base64
 
+def decrypt_phone(encrypted_phone):
+    key = b'ysiVkLJHHnvMWCHq'
+    iv = b'ichYooX+Mb1gRetP'
+    aes = AES.new(key=key, mode=AES.MODE_CBC, iv=iv)
+    encrypted_data = base64.b64decode(encrypted_phone)
+    decrypted_data = unpad(aes.decrypt(encrypted_data), AES.block_size, style='pkcs7')
+    return decrypted_data.decode('UTF-8')
 
-# ===================== 请求头（模拟酷我 App WebView） =====================
-def headers():
-    return {
-        "Connection": "keep-alive",
-        "Accept": "application/json, text/plain, */*",
-        "sec-ch-ua-mobile": "?1",
-        "User-Agent": (
-            "Mozilla/5.0 (Linux; Android 14; POCO F2 Pro Build/UQ1A.240105.004; wv) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/121.0.6167.101 "
-            "Mobile Safari/537.36/ kuwopage"
-        ),
-        "sec-ch-ua-platform": '"Android"',
-        "Origin": "https://h5app.kuwo.cn",
-        "X-Requested-With": "cn.kuwo.player",
-        "Sec-Fetch-Site": "same-site",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "empty",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-    }
+def generate_kuwo_token(device_id, timestamp):
+    raw_string = str(device_id) + 'KUWO_COMIC' + str(timestamp)
+    token = hashlib.md5(raw_string.encode('utf-8')).hexdigest()
+    return token
 
-
-# ===================== 登录 =====================
-def login(q):
-    """调用酷我登录接口，从 Set-Cookie 解析 uid/sid。"""
-    url = "http://ar.i.kuwo.cn/US_NEW/kuwo/login_kw"
-    h = {"Accept": "*/*", "Host": "ar.i.kuwo.cn", "Connection": "Keep-Alive"}
-    try:
-        r = requests.get(url, params={"f": "ar", "q": q}, headers=h, timeout=15)
-        sc = r.headers.get("Set-Cookie", "")
-        u = re.search(r"uname3=([^;]+)", sc)
-        sid = re.search(r"websid=([^;]+)", sc)
-        uid = re.search(r"userid=([^;]+)", sc)
-        if not (u and sid and uid):
-            log.warning("登录失败：无法从 Cookie 解析 uid/sid，请检查 q 参数")
+def parse_account_item(account_str):
+    parts = [x.strip() for x in account_str.split('#')]
+    if len(parts) < 2:
+        return None
+    if len(parts) == 2:
+        phone, password = parts[0], parts[1]
+        if not phone or not password:
             return None
-        return {"username": u.group(1), "loginSid": sid.group(1), "loginUid": uid.group(1)}
+        return {'phone': phone, 'password': password}
+    phone = parts[1]
+    password = '#'.join(parts[2:])
+    if not phone or not password:
+        return None
+    return {'phone': phone, 'password': password}
+
+def get_accounts_from_env():
+    env_value = os.getenv('kwyy', '').strip()
+    if not env_value:
+        return []
+    accounts = []
+    account_strings = env_value.split('&')
+    for account_str in account_strings:
+        account_str = account_str.strip()
+        if not account_str:
+            continue
+        parsed = parse_account_item(account_str)
+        if parsed:
+            accounts.append(parsed)
+    return accounts
+
+def login(username, password):
+    try:
+        q, encrypted_dev_id = get_q(username, password)
+        url = 'http://ar.i.kuwo.cn/US_NEW/kuwo/login_kw'
+        headers = {
+            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 10; MI 8 MIUI/V12.5.2.0.QEACNXM)',
+            'Accept': '*/*',
+            'Host': 'ar.i.kuwo.cn',
+            'Connection': 'Keep-Alive',
+            'Accept-Encoding': 'gzip',
+        }
+        params = {'f': 'ar', 'q': q}
+        response = requests.get(url, headers=headers, params=params)
+        set_cookie = response.headers.get('Set-Cookie', '')
+        username_match = re.search(r'uname3=([^;]+)', set_cookie)
+        sid_match = re.search(r'websid=([^;]+)', set_cookie)
+        uid_match = re.search(r'userid=([^;]+)', set_cookie)
+        account_match = re.search(r't3kwid=([^;]+)', set_cookie)
+        if all([username_match, sid_match, uid_match, account_match]):
+            loginUid = uid_match.group(1)
+            loginSid = sid_match.group(1)
+            username_ret = username_match.group(1)
+            appUid = account_match.group(1)
+            return loginUid, loginSid, username_ret, appUid, encrypted_dev_id
+        print('❌ 登录失败: Cookie解析失败')
+        return None
     except Exception as e:
-        log.error("登录异常: %s", e)
+        print('❌ 登录异常: ' + str(e))
         return None
 
-
-# ===================== 任务请求封装 =====================
-def _call(url, params, tag):
+def open_treasure_box(loginUid, loginSid, appUid, encrypted_dev_id, gold_num=20, verbose=True):
     try:
-        r = requests.get(url, params=params, headers=headers(), timeout=15)
-        try:
-            j = r.json()
-        except Exception:
-            return f"{tag}>>>非JSON响应: {r.text[:60]}"
-        msg = j.get("msg") or j.get("message") or ""
-        data = j.get("data") or {}
-        obtain = data.get("obtain") or data.get("goldNum") or data.get("description") or ""
-        text = (str(msg) + " " + str(obtain)).strip()
-        return f"{tag}>>>{text or r.text[:60]}"
+        url = 'https://integralapi.kuwo.cn/api/v1/online/sign/new/newBoxFinish'
+        r_value = random.random()
+        params = {
+            'apiversion': '46',
+            'loginUid': loginUid,
+            'loginSid': loginSid,
+            'devId': encrypted_dev_id,
+            'jfencv': 'devId',
+            'appUid': appUid,
+            'source': 'kwplayer_ar_12.0.4.1_newpcguanwangmobile.apk',
+            'version': 'kwplayer_ar_12.0.4.1',
+            'dynamicVer': '46',
+            'kver': '1',
+            'verifyStr': '',
+            'adverSpace': '',
+            'r': str(r_value),
+            'action': 'new',
+            'time': '',
+            'goldNum': str(gold_num),
+            'baseTaskGold': '0',
+            'extraGoldnum': '0',
+            'clickExtraGoldNum': '0',
+            'yyzdSecondRewardFlag': '0',
+            'secondRewardFlag': '0',
+            'apiv': '6',
+        }
+        headers = {
+            'Host': 'integralapi.kuwo.cn',
+            'Connection': 'keep-alive',
+            'sec-ch-ua-platform': '"Android"',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/134.0.6998.135 Mobile Safari/537.36/ kuwopage',
+            'Accept': 'application/json, text/plain, */*',
+            'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Android WebView";v="134"',
+            'sec-ch-ua-mobile': '?1',
+            'Origin': 'https://h5app.kuwo.cn',
+            'X-Requested-With': 'cn.kuwo.player',
+            'Sec-Fetch-Site': 'same-site',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Dest': 'empty',
+            'Referer': 'https://h5app.kuwo.cn/',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        }
+        response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('code') == 200:
+                data = result.get('data', {})
+                status = data.get('status', 0)
+                if status == 1:
+                    obtain = data.get('obtain', 0)
+                    extra_num = data.get('extraNum', 0)
+                    if verbose:
+                        print('✅ 开宝箱成功: 获得 ' + str(obtain) + ' 金币' + ((' (额外 ' + str(extra_num) + ' 金币)') if extra_num else ''))
+                    return {'success': True, 'obtain': obtain, 'extra_num': extra_num, 'description': '成功'}
+                description = data.get('description', '未知错误')
+                if verbose:
+                    print('⚠️  开宝箱失败: ' + description)
+                return {'success': False, 'obtain': 0, 'description': description}
+            error_msg = result.get('msg', '未知错误')
+            if verbose:
+                print('❌ 开宝箱请求失败: ' + error_msg)
+            return {'success': False, 'obtain': 0, 'description': error_msg}
+        if verbose:
+            print('❌ 请求失败，状态码: ' + str(response.status_code))
+        return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code)}
     except Exception as e:
-        return f"{tag}>>>异常: {e}"
+        if verbose:
+            print('❌ 开宝箱异常: ' + str(e))
+        return {'success': False, 'obtain': 0, 'description': str(e)}
 
-
-def do_sign(uid, sid, appuid):
-    return _call(
-        "https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen",
-        {"loginUid": uid, "loginSid": sid, "appUid": appuid, "terminal": "ar",
-         "from": "sign", "adverId": "20130802-13379713291", "token": "",
-         "extraGoldNum": "88", "clickExtraGoldNum": "0",
-         "surpriseType": "", "verificationId": "", "mobile": ""},
-        "签到",
-    )
-
-
-def do_listen(uid, sid, appuid):
-    return _call(
-        "https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen",
-        {"loginUid": uid, "loginSid": sid, "appUid": appuid, "terminal": "ar",
-         "from": "videoadver", "goldNum": "58", "adverId": "", "token": "",
-         "extraGoldNum": "0", "clickExtraGoldNum": "0",
-         "surpriseType": "", "verificationId": "", "mobile": ""},
-        "创意视频",
-    )
-
-
-def do_everyday_music(uid, sid, appuid):
-    return _call(
-        "https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/everydaymusic/doListen",
-        {"loginUid": uid, "loginSid": sid, "appUid": appuid, "terminal": "ar",
-         "from": "everyday", "token": "", "mobile": ""},
-        "每日音乐",
-    )
-
-
-def do_box(uid, sid, devid, appuid):
-    hour = datetime.datetime.now().hour
-    ranges = {0: "00-08", 8: "08-10", 10: "10-12", 12: "12-14",
-              14: "14-16", 16: "16-18", 18: "18-20", 20: "20-24"}
-    tr = next((v for k, v in ranges.items() if k <= hour < k + 2), "20-24")
-    return _call(
-        "https://integralapi.kuwo.cn/api/v1/online/sign/new/newBoxFinish",
-        {"loginUid": uid, "loginSid": sid, "devId": devid, "appUid": appuid,
-         "source": "kwplayer_ar_10.7.6.2_qq.apk", "version": "kwplayer_ar_10.7.6.2",
-         "r": f"{random.random()}", "action": "new", "time": tr,
-         "goldNum": "23", "extraGoldnum": "0", "clickExtraGoldNum": "0"},
-        f"开宝箱[{tr}]",
-    )
-
-
-def do_lottery(uid, sid, appuid, ltype):
-    return _call(
-        "https://integralapi.kuwo.cn/api/v1/online/sign/loterry/getLucky",
-        {"loginUid": uid, "loginSid": sid, "appUid": appuid,
-         "source": "kwplayer_ar_10.7.6.2_qq.apk", "type": ltype},
-        "抽奖" if ltype == "free" else "看视频抽奖",
-    )
-
-
-def do_freemium(uid, sid, appuid):
-    return _call(
-        "https://wapi.kuwo.cn/openapi/v1/user/freemium/h5/switches",
-        {"loginUid": uid, "loginSid": sid, "appUid": appuid, "terminal": "ar"},
-        "免费听歌",
-    )
-
-
-# ===================== 每日去重 =====================
-def already_done_today(phone):
-    if not os.path.exists(STATE_PATH):
-        return False
+def open_guanggao(loginUid, loginSid, appUid, encrypted_dev_id, gold_num, phone, verbose=True):
     try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
-            state = json.load(f)
-        return state.get(phone) == datetime.date.today().isoformat()
-    except Exception:
-        return False
+        url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen'
+        params = {
+            'apiversion': '46',
+            'adverSpace': '20130101',
+            'loginUid': loginUid,
+            'loginSid': loginSid,
+            'appUid': appUid,
+            'terminal': 'ar',
+            'from': 'videoadver',
+            'taskId': '',
+            'goldNum': '208',
+            'baseTaskGold': '0',
+            'adverId': '',
+            'mobile': phone,
+            'listenTime': 0,
+            'apiv': 10,
+            'unit': '',
+            'dynamicVer': 46,
+            'kver': 1,
+            'rewardType': 0,
+            'pFrom': 'HTTP/1.1',
+        }
+        headers = {
+            'Host': 'integralapi.kuwo.cn',
+            'Connection': 'keep-alive',
+            'sec-ch-ua-platform': '"Android"',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/134.0.6998.135 Mobile Safari/537.36/ kuwopage',
+            'Accept': 'application/json, text/plain, */*',
+            'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Android WebView";v="134"',
+            'sec-ch-ua-mobile': '?1',
+            'Origin': 'https://h5app.kuwo.cn',
+            'X-Requested-With': 'cn.kuwo.player',
+            'Sec-Fetch-Site': 'same-site',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Dest': 'empty',
+            'Referer': 'https://h5app.kuwo.cn/',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        }
+        response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('code') == 200:
+                data = result.get('data', {})
+                status = data.get('status', 0)
+                if status == 1:
+                    obtain = data.get('obtain', 0)
+                    description = data.get('description', '成功')
+                    if verbose:
+                        print('✅ 广告观看成功: 获得 ' + str(obtain) + ' 金币 - ' + description)
+                    return {'success': True, 'obtain': obtain, 'description': description}
+                description = data.get('description', '未知错误')
+                if verbose:
+                    print('⚠️  广告观看失败: ' + description)
+                return {'success': False, 'obtain': 0, 'description': description}
+            error_msg = result.get('msg', '未知错误')
+            if verbose:
+                print('❌ 广告观看请求失败: ' + error_msg)
+            return {'success': False, 'obtain': 0, 'description': error_msg}
+        if verbose:
+            print('❌ 请求失败，状态码: ' + str(response.status_code))
+        return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code)}
+    except Exception as e:
+        if verbose:
+            print('❌ 广告观看异常: ' + str(e))
+        return {'success': False, 'obtain': 0, 'description': str(e)}
 
-
-def mark_done(phone):
-    state = {}
-    if os.path.exists(STATE_PATH):
-        try:
-            with open(STATE_PATH, "r", encoding="utf-8") as f:
-                state = json.load(f)
-        except Exception:
-            state = {}
-    state[phone] = datetime.date.today().isoformat()
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-
-
-# ===================== 单账号主流程 =====================
-def run_account(acc, force=False):
-    phone = acc.get("phone", "?")
-    res = {"phone": phone, "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-           "status": "running", "username": "", "coins": 0, "tasks": [], "note": ""}
-    if not force and already_done_today(phone):
-        res["status"] = "skipped"
-        res["note"] = "今日已执行（强制重跑请用 --force 或 Web 面板强制）"
-        log.info("账号 %s 今日已执行，跳过", phone)
-        return res
-
-    info = login(acc.get("q", ""))
-    if not info:
-        res["status"] = "login_failed"
-        res["note"] = "登录失败"
-        log.warning("账号 %s 登录失败", phone)
-        return res
-    log.info("账号 %s 登录成功：%s", phone, info["username"])
-    res["username"] = info["username"]
-    uid, sid = info["loginUid"], info["loginSid"]
-    appuid, devid = acc["appuid"], acc["devid"]
-
-    tasks = [
-        ("签到", lambda: do_sign(uid, sid, appuid)),
-        ("创意视频", lambda: do_listen(uid, sid, appuid)),
-        ("每日音乐", lambda: do_everyday_music(uid, sid, appuid)),
-        ("开宝箱", lambda: do_box(uid, sid, devid, appuid)),
-        ("免费抽奖", lambda: do_lottery(uid, sid, appuid, "free")),
-        ("看视频抽奖", lambda: do_lottery(uid, sid, appuid, "video")),
-        ("免费听歌", lambda: do_freemium(uid, sid, appuid)),
-    ]
-    for name, fn in tasks:
-        ok = False
-        msg = ""
-        for attempt in range(1 + SETTINGS.get("max_retry", 1)):
-            try:
-                msg = fn()
-                ok = True
-                break
-            except Exception as e:
-                msg = f"异常: {e}"
-                time.sleep(3)
-        res["tasks"].append({"name": name, "msg": msg, "ok": ok})
-        log.info("  %s %s", name, msg)
-        time.sleep(random.randint(SETTINGS["min_delay"], SETTINGS["max_delay"]))
-
-    res["status"] = "done"
-    mark_done(phone)
-    HISTORY[phone] = res
-    save_history()
-    return res
-
-
-def run_all(force=False):
-    with run_lock:
-        log.info("====== 开始执行全部账号 (force=%s) ======", force)
-        results = []
-        for acc in ACCOUNTS:
-            if not all(k in acc for k in ("appuid", "devid", "q")):
-                log.warning("跳过不完整账号: %s", acc)
+def clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbose=True):
+    clock_gold_num = 59
+    try:
+        task_payload = fetch_dynamic_task_payload(loginUid, loginSid, appUid, {})
+        data_list = task_payload.get('dataList', [])
+        if not isinstance(data_list, list):
+            data_list = []
+        for item in data_list:
+            if not isinstance(item, dict):
                 continue
-            try:
-                results.append(run_account(acc, force=force))
-            except Exception as e:
-                log.error("账号执行出错: %s", e)
-        # 汇总推送
-        summary = "酷我签到完成：\n" + "\n".join(
-            f"· {r['phone']} [{r['status']}] " + " / ".join(t['name'] for t in r['tasks']) for r in results
-        )
-        log.info("====== 本轮结束 ======")
-        if results:
-            push_text(summary)
-        return results
+            subtitle = str(item.get('subTitle') or '')
+            task_type = str(item.get('taskType') or '')
+            if '打卡' in subtitle or task_type == 'clock':
+                gold_num = to_int(item.get('goldNum'))
+                if gold_num > 0:
+                    clock_gold_num = gold_num
+                    break
+    except Exception:
+        pass
 
+    return run_new_do_listen_task(
+        '整点领金币',
+        loginUid,
+        loginSid,
+        appUid,
+        phone,
+        {'from': 'clock', 'goldNum': str(clock_gold_num)},
+        verbose=verbose,
+    )
 
-# ===================== 可选推送（仅发往你自己的地址） =====================
-def push_text(text):
-    p = SETTINGS.get("push") or {}
-    t = p.get("type")
+def watch_dada_ad(loginUid, loginSid, appUid, encrypted_dev_id, phone):
+    timestamp = str(int(time.time() * 1000))
+    dynamic_token = generate_kuwo_token(encrypted_dev_id, timestamp)
+    url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen'
+    token_parts = '1,2,20130401,' + f'{loginUid},' + f'{dynamic_token}'
+    params = {
+        'apiversion': '46',
+        'adverSpace': '20130401',
+        'verifyStr': '',
+        'loginUid': loginUid,
+        'loginSid': loginSid,
+        'appUid': appUid,
+        'terminal': 'ar',
+        'from': 'videofix',
+        'taskId': '',
+        'goldNum': '50',
+        'baseTaskGold': '0',
+        'adverId': '',
+        'token': '',
+        'extraGoldNum': '0',
+        'clickExtraGoldNum': '0',
+        'secondRewardFlag': '0',
+        'yyzdSecondRewardFlag': '0',
+        'surpriseType': '',
+        'mobile': phone,
+        'apiv': '10',
+        'dynamicVer': '46',
+        'kver': '1',
+        'rewardType': '0',
+        'pFrom': '',
+    }
+    headers = {
+        'Host': 'integralapi.kuwo.cn',
+        'Connection': 'keep-alive',
+        'sec-ch-ua-platform': '"Android"',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 Mobile Safari/537.36/ kuwopage',
+        'Accept': 'application/json, text/plain, */*',
+        'sec-ch-ua': '"Android WebView";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+        'sec-ch-ua-mobile': '?1',
+        'Origin': 'https://h5app.kuwo.cn',
+        'X-Requested-With': 'cn.kuwo.player',
+        'Sec-Fetch-Site': 'same-site',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty',
+        'Referer': 'https://h5app.kuwo.cn/',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    }
     try:
-        if t == "webhook" and p.get("url"):
-            requests.post(p["url"], json={"text": text}, timeout=10)
-        elif t == "bark" and p.get("url"):
-            requests.get(p["url"] + requests.utils.quote(text), timeout=10)
-        elif t == "tg" and p.get("url"):
-            requests.post(p["url"], json={"chat_id": p.get("token", ""), "text": text}, timeout=10)
-        else:
-            return
-        log.info("推送已发送(%s)", t)
+        response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('code') == 200:
+                data = result.get('data', {})
+                status = data.get('status', 0)
+                if status == 1:
+                    obtain = data.get('obtain', 0)
+                    description = data.get('description', '成功')
+                    print('✅ 广告观看成功: 获得 ' + str(obtain) + ' 金币 - ' + description)
+                    return {'success': True, 'obtain': obtain, 'description': description}
+                description = data.get('description', '未知错误')
+                print('⚠️  广告观看失败: ' + description)
+                return {'success': False, 'obtain': 0, 'description': description}
+            error_msg = result.get('msg', '未知错误')
+            print('❌ 广告观看请求失败: ' + error_msg)
+            return {'success': False, 'obtain': 0, 'description': error_msg}
+        print('❌ 请求失败，状态码: ' + str(response.status_code))
+        return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code)}
     except Exception as e:
-        log.error("推送失败: %s", e)
+        print('❌ 广告观看异常: ' + str(e))
+        return {'success': False, 'obtain': 0, 'description': str(e)}
 
+def lottery_draw(loginUid, loginSid, appUid, source='kwplayer_ar_12.0.4.1_newpcguanwangmobile.apk', lottery_type='free', verbose=True):
+    try:
+        url = 'https://integralapi.kuwo.cn/api/v1/online/sign/loterry/getLucky'
+        params = {'loginUid': loginUid, 'loginSid': loginSid, 'appUid': appUid, 'source': source, 'type': lottery_type}
+        headers = {
+            'Host': 'integralapi.kuwo.cn',
+            'Connection': 'keep-alive',
+            'sec-ch-ua-platform': '"Android"',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 Mobile Safari/537.36/ kuwopage',
+            'Accept': 'application/json, text/plain, */*',
+            'sec-ch-ua': '"Android WebView";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+            'sec-ch-ua-mobile': '?1',
+            'Origin': 'https://h5app.kuwo.cn',
+            'X-Requested-With': 'cn.kuwo.player',
+            'Sec-Fetch-Site': 'same-site',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Dest': 'empty',
+            'Referer': 'https://h5app.kuwo.cn/',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        }
+        response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
+        if response.status_code == 200:
+            result = response.json()
+            code = result.get('code', 0)
+            msg = result.get('msg', '未知')
+            if code == 200:
+                data = result.get('data', {})
+                if not isinstance(data, dict):
+                    data = {}
+                reward_name = str(data.get('loterryname') or data.get('lotteryName') or msg)
+                obtain = to_int(data.get('goldNum') or data.get('obtain') or data.get('awardScore') or data.get('score') or 0)
+                if obtain <= 0:
+                    match = re.search(r'(\d+)\s*金币', reward_name + ' ' + msg)
+                    if match:
+                        obtain = to_int(match.group(1))
+                if verbose:
+                    if obtain > 0:
+                        print('🎉 抽奖成功: ' + reward_name + ' (+' + str(obtain) + ' 金币)')
+                    else:
+                        print('🎉 抽奖成功: ' + reward_name)
+                return {'success': True, 'message': msg, 'reward_name': reward_name, 'obtain': obtain, 'data': data}
+            if code == 11:
+                if verbose:
+                    print('❌ 抽奖失败: ' + msg)
+                return {'success': False, 'message': msg, 'data': {}}
+            if verbose:
+                print('❌ 抽奖失败: ' + msg)
+            return {'success': False, 'message': msg, 'data': {}}
+        if verbose:
+            print('❌ 请求失败，状态码: ' + str(response.status_code))
+        return {'success': False, 'message': 'HTTP ' + str(response.status_code), 'data': {}}
+    except Exception as e:
+        if verbose:
+            print('❌ 抽奖异常: ' + str(e))
+        return {'success': False, 'message': str(e), 'data': {}}
 
-# ===================== 内置调度器 =====================
-def scheduler_loop():
-    while not stop_event.is_set():
-        mode = SETTINGS.get("interval_mode", "daily")
-        if mode == "interval":
-            secs = SETTINGS.get("interval_minutes", 120) * 60
-            log.info("调度器(interval)：每 %d 分钟运行一次", SETTINGS.get("interval_minutes", 120))
-            time.sleep(secs)
-            if not stop_event.is_set():
-                run_all()
-        else:
-            now = datetime.datetime.now()
-            hh, mm = (int(x) for x in str(SETTINGS.get("schedule", "09:00")).split(":"))
-            target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-            if target <= now:
-                target += datetime.timedelta(days=1)
-            secs = (target - now).total_seconds()
-            log.info("调度器(daily)：下次运行 %s", target.strftime("%Y-%m-%d %H:%M"))
-            if stop_event.wait(secs):
+def run_activity_box_task(loginUid, loginSid, verbose=True):
+    params = {
+        'loginUid': loginUid,
+        'loginSid': loginSid,
+        'from': 'sign',
+        'extraGoldNum': '110',
+    }
+    try:
+        response = requests.get(URL_NEW_BOX_LIST, headers=build_common_headers(), params=params, timeout=30, verify=False)
+        if response.status_code != 200:
+            if verbose:
+                print('❌ 活动宝箱列表请求失败: HTTP ' + str(response.status_code))
+            return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code)}
+
+        result = response.json()
+        if result.get('code') != 200:
+            msg = str(result.get('msg', '未知错误'))
+            if verbose:
+                print('❌ 活动宝箱列表请求失败: ' + msg)
+            return {'success': False, 'obtain': 0, 'description': msg}
+
+        data = result.get('data', {})
+        if not isinstance(data, dict):
+            data = {}
+        gold_num = to_int(data.get('goldNum') or 0)
+        if gold_num <= 0:
+            if verbose:
+                print('⏭️ 活动宝箱: 暂无可领取金币')
+            return {'success': True, 'done': True, 'obtain': 0, 'description': '暂无可领取金币'}
+
+        finish_params = {
+            'loginUid': loginUid,
+            'loginSid': loginSid,
+            'action': 'new',
+            'goldNum': gold_num,
+        }
+        finish_resp = requests.get(URL_NEW_BOX_FINISH, headers=build_common_headers(), params=finish_params, timeout=30, verify=False)
+        if finish_resp.status_code != 200:
+            if verbose:
+                print('❌ 活动宝箱领取请求失败: HTTP ' + str(finish_resp.status_code))
+            return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(finish_resp.status_code)}
+
+        finish_result = finish_resp.json()
+        if finish_result.get('code') == 200:
+            if verbose:
+                print('✅ 活动宝箱成功: 获得 ' + str(gold_num) + ' 金币')
+            return {'success': True, 'obtain': gold_num, 'description': '成功'}
+
+        msg = str(finish_result.get('msg', '未知错误'))
+        if verbose:
+            print('⚠️  活动宝箱领取失败: ' + msg)
+        return {'success': False, 'obtain': 0, 'description': msg}
+    except Exception as e:
+        if verbose:
+            print('❌ 活动宝箱异常: ' + str(e))
+        return {'success': False, 'obtain': 0, 'description': str(e)}
+
+def run_box_renew_tasks(loginUid, loginSid, gold_num=30, verbose=True):
+    time_windows = ['00-08', '08-10', '10-12', '12-14', '14-16', '16-18', '18-20', '20-24']
+    success_count = 0
+    total_count = len(time_windows) * 2
+    run_index = 0
+    stop_all = False
+    for time_window in time_windows:
+        for action, action_name in [('new', '新宝箱'), ('old', '补宝箱')]:
+            run_index += 1
+            params = {
+                'loginUid': loginUid,
+                'loginSid': loginSid,
+                'action': action,
+                'time': time_window,
+                'goldNum': str(gold_num),
+            }
+            try:
+                response = requests.get(URL_BOX_RENEW, headers=build_common_headers(), params=params, timeout=30, verify=False)
+                if response.status_code != 200:
+                    if verbose:
+                        print('  第' + str(run_index) + '/' + str(total_count) + '次 ❌ ' + action_name + '(' + time_window + '): HTTP ' + str(response.status_code))
+                    continue
+                result = response.json()
+                if result.get('code') == 200:
+                    success_count += 1
+                    if verbose:
+                        print('  第' + str(run_index) + '/' + str(total_count) + '次 ✅ ' + action_name + '(' + time_window + ')')
+                else:
+                    msg = str(result.get('msg', '未知错误'))
+                    if verbose:
+                        print('  第' + str(run_index) + '/' + str(total_count) + '次 ❌ ' + action_name + '(' + time_window + '): ' + msg)
+                    if is_done_like(msg):
+                        stop_all = True
+            except Exception as e:
+                if verbose:
+                    print('  第' + str(run_index) + '/' + str(total_count) + '次 ❌ ' + action_name + '(' + time_window + '): ' + str(e))
+            if stop_all:
                 break
-            run_all()
+        if stop_all:
+            break
+    if verbose:
+        print('  汇总: 成功 ' + str(success_count) + '/' + str(total_count))
+    return {'success_count': success_count, 'total_count': total_count}
 
+def watch_surprise_ad(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbose=True):
+    try:
+        url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen'
+        params = {
+            'apiversion': '46',
+            'adverSpace': '20130702',
+            'verifyStr': '',
+            'loginUid': loginUid,
+            'loginSid': loginSid,
+            'appUid': appUid,
+            'terminal': 'ar',
+            'from': 'surprise',
+            'taskId': '',
+            'goldNum': '68',
+            'baseTaskGold': '0',
+            'adverId': '20130702-77797065644-101',
+            'token': '',
+            'clickExtraGoldNum': '0',
+            'secondRewardFlag': '0',
+            'yyzdSecondRewardFlag': '0',
+            'verificationId': '',
+            'surpriseType': '',
+            'mobile': phone,
+            'apiv': '10',
+            'dynamicVer': '46',
+            'kver': '1',
+            'rewardType': '0',
+            'pFrom': '',
+        }
+        headers = {
+            'Host': 'integralapi.kuwo.cn',
+            'Connection': 'keep-alive',
+            'sec-ch-ua-platform': '"Android"',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 Mobile Safari/537.36/ kuwopage',
+            'Accept': 'application/json, text/plain, */*',
+            'sec-ch-ua': '"Android WebView";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+            'sec-ch-ua-mobile': '?1',
+            'Origin': 'https://h5app.kuwo.cn',
+            'X-Requested-With': 'cn.kuwo.player',
+            'Sec-Fetch-Site': 'same-site',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Dest': 'empty',
+            'Referer': 'https://h5app.kuwo.cn/',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        }
+        response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('code') == 200:
+                data = result.get('data', {})
+                status = data.get('status', 0)
+                if status == 1:
+                    obtain = data.get('obtain', 0)
+                    description = data.get('description', '成功')
+                    if verbose:
+                        print('✅ 惊喜广告观看成功: 获得 ' + str(obtain) + ' 金币 - ' + description)
+                    return {'success': True, 'obtain': obtain, 'description': description}
+                description = data.get('description', '未知错误')
+                if verbose:
+                    print('⚠️  惊喜广告观看失败: ' + description)
+                return {'success': False, 'obtain': 0, 'description': description}
+            error_msg = result.get('msg', '未知错误')
+            if verbose:
+                print('❌ 惊喜广告观看请求失败: ' + error_msg)
+            return {'success': False, 'obtain': 0, 'description': error_msg}
+        if verbose:
+            print('❌ 请求失败，状态码: ' + str(response.status_code))
+        return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code)}
+    except Exception as e:
+        if verbose:
+            print('❌ 惊喜广告观看异常: ' + str(e))
+        return {'success': False, 'obtain': 0, 'description': str(e)}
 
-# ===================== Web 面板 =====================
-def make_app():
-    from flask import Flask, request, jsonify, render_template_string
+def build_common_headers():
+    return {
+        'Host': 'integralapi.kuwo.cn',
+        'Connection': 'keep-alive',
+        'sec-ch-ua-platform': '"Android"',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/134.0.6998.135 Mobile Safari/537.36/ kuwopage',
+        'Accept': 'application/json, text/plain, */*',
+        'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Android WebView";v="134"',
+        'sec-ch-ua-mobile': '?1',
+        'Origin': 'https://h5app.kuwo.cn',
+        'X-Requested-With': 'cn.kuwo.player',
+        'Sec-Fetch-Site': 'same-site',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty',
+        'Referer': 'https://h5app.kuwo.cn/',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    }
 
-    app = Flask(__name__)
-    PW = SETTINGS.get("web_password", "")
-
-    def check_auth():
-        if not PW:
+def is_done_like(text):
+    if not text:
+        return False
+    for keyword in DONE_KEYWORDS:
+        if keyword in str(text):
             return True
-        return request.args.get("token") == PW or request.headers.get("X-Token") == PW
+    return False
 
-    DASH = """
-    <!doctype html><html lang="zh"><head><meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>酷我自动签到 · 面板</title>
-    <style>
-    :root{--bg:#0f1115;--card:#1a1d24;--fg:#e6e6e6;--m:#3b82f6;--ok:#22c55e;--bad:#ef4444;--mut:#9ca3af}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
-    font:14px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial;padding:24px}
-    h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px;color:var(--mut)}
-    .wrap{max-width:960px;margin:0 auto}
-    .bar{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
-    button{background:var(--m);color:#fff;border:0;padding:9px 16px;border-radius:8px;
-    cursor:pointer;font-size:14px}button.sec{background:#374151}
-    .card{background:var(--card);border-radius:12px;padding:16px;margin-bottom:14px}
-    table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px 10px;
-    border-bottom:1px solid #2a2e37}th{color:var(--mut);font-weight:600}
-    .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px}
-    .ok{background:rgba(34,197,94,.15);color:var(--ok)}
-    .bad{background:rgba(239,68,68,.15);color:var(--bad)}
-    .skip{background:rgba(156,163,175,.15);color:var(--mut)}
-    .tasks{font-size:12px;color:var(--mut);margin-top:4px}
-    input{background:#0b0d11;border:1px solid #2a2e37;color:var(--fg);
-    border-radius:8px;padding:8px;width:100%;margin:4px 0}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    pre{background:#0b0d11;border-radius:10px;padding:14px;max-height:320px;overflow:auto;
-    font-size:12px;color:#a5b4fc}
-    a{color:var(--m)}
-    </style></head><body><div class="wrap">
-    <h1>酷我音乐自动签到 · 面板</h1>
-    <div style="color:var(--mut)">仅调用酷我官方接口，无第三方外发 · 下次运行：<span id="next"></span></div>
-    <div class="bar">
-      <button onclick="api('/api/run','POST')">立即运行全部</button>
-      <button class="sec" onclick="location.reload()">刷新</button>
-    </div>
-    <h2>账号状态</h2><div id="accounts"></div>
-    <h2>新增 / 修改账号</h2>
-    <div class="card"><div class="grid">
-      <input id="appuid" placeholder="appuid">
-      <input id="devid" placeholder="devid">
-      <input id="q" placeholder="q（登录票据）">
-      <input id="phone" placeholder="phone（绑定手机号）">
-    </div><button onclick="addAccount()">保存账号</button></div>
-    <h2>运行日志（最近 200 行）</h2>
-    <pre id="logs"></pre>
-    <script>
-    const tk='{{ token }}';
-    function auth(u){return u.includes('?')?u+'&token='+tk:u+'?token='+tk;}
-    async function api(u,m){try{const r=await fetch(auth(u),{method:m});
-      const j=await r.json().catch(()=>({msg:r.statusText}));
-      alert((j.detail||j.msg||JSON.stringify(j)).toString());location.reload();
-    }catch(e){alert('请求失败:'+e)}}
-    async function load(){
-      const [s,l]=await Promise.all([fetch(auth('/api/status')).then(r=>r.json()),
-        fetch(auth('/api/logs')).then(r=>r.text())]);
-      document.getElementById('next').textContent=s.next_run||'-';
-      let h='<table><tr><th>手机号</th><th>用户</th><th>状态</th><th>时间</th><th>任务</th></tr>';
-      (s.accounts||[]).forEach(a=>{
-        const st=a.status==='done'?'ok':(a.status==='skipped'?'skip':'bad');
-        const label={done:'已完成',skipped:'今日跳过',login_failed:'登录失败',running:'运行中'}[a.status]||a.status;
-        const ts=(a.tasks||[]).map(t=>t.name+(t.ok?'✓':'✗')).join(' ');
-        h+=`<tr><td>${a.phone}</td><td>${a.username||'-'}</td>
-        <td><span class="tag ${st}">${label}</span></td><td>${a.time||'-'}</td>
-        <td class="tasks">${ts||'-'}</td></tr>`;
-      });
-      h+='</table>';document.getElementById('accounts').innerHTML=h;
-      document.getElementById('logs').textContent=l;
-    }
-    async function addAccount(){
-      const b={appuid:appuid.value,devid:devid.value,q:q.value,phone:phone.value};
-      if(!b.appuid||!b.devid||!b.q){alert('请填 appuid/devid/q');return;}
-      const r=await fetch(auth('/api/accounts'),{method:'POST',
-        headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
-      alert((await r.json()).msg||'ok');location.reload();
-    }
-    load();
-    </script></div></body></html>
-    """
+def is_video_limit_like(text):
+    if not text:
+        return False
+    value = str(text)
+    keywords = [
+        '已达到当日观看额外视频次数',
+        '视频次数用完了',
+        '免费次数用完了',
+        '观看额外视频次数',
+    ]
+    for keyword in keywords:
+        if keyword in value:
+            return True
+    return False
 
-    @app.before_request
-    def _auth():
-        if request.path.startswith("/api/") and not check_auth():
-            from flask import abort
-            abort(401)
+def to_int(value):
+    try:
+        if value is None:
+            return 0
+        text = str(value).strip()
+        if text == '' or text.lower() == 'null':
+            return 0
+        if '.' in text:
+            return int(float(text))
+        return int(text)
+    except Exception:
+        return 0
+
+def run_generic_task(title, url, params, verbose=True):
+    try:
+        response = requests.get(url, headers=build_common_headers(), params=params, timeout=30, verify=False)
+        if response.status_code != 200:
+            if verbose:
+                print('❌ ' + title + '请求失败: HTTP ' + str(response.status_code))
+            return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code), 'data': {}}
+
+        result = response.json()
+        if result.get('code') != 200:
+            msg = str(result.get('msg', '未知错误'))
+            if verbose:
+                print('❌ ' + title + '请求失败: ' + msg)
+            return {'success': False, 'obtain': 0, 'description': msg, 'data': {}}
+
+        data = result.get('data', {})
+        if not isinstance(data, dict):
+            data = {}
+        status = data.get('status', 1)
+        if isinstance(status, str) and status.isdigit():
+            status = int(status)
+        obtain = to_int(data.get('obtain') or data.get('goldNum') or 0)
+        description = str(data.get('description') or result.get('msg') or '成功')
+
+        if status == 1:
+            if verbose:
+                print('✅ ' + title + '成功: +' + str(obtain) + ' 金币 - ' + description)
+            return {'success': True, 'obtain': obtain, 'description': description, 'data': data}
+
+        if is_done_like(description):
+            if verbose:
+                print('⏭️ ' + title + ': ' + description)
+            return {'success': True, 'done': True, 'obtain': obtain, 'description': description, 'data': data}
+
+        if verbose:
+            print('⚠️  ' + title + '失败: ' + description)
+        return {'success': False, 'obtain': 0, 'description': description, 'data': data}
+    except Exception as e:
+        if verbose:
+            print('❌ ' + title + '异常: ' + str(e))
+        return {'success': False, 'obtain': 0, 'description': str(e), 'data': {}}
+
+def run_new_do_listen_task(title, loginUid, loginSid, appUid, phone, extra_params, verbose=True):
+    params = {
+        'apiversion': '46',
+        'adverSpace': '',
+        'verifyStr': '',
+        'loginUid': loginUid,
+        'loginSid': loginSid,
+        'appUid': appUid,
+        'terminal': 'ar',
+        'from': '',
+        'taskId': '',
+        'goldNum': '',
+        'baseTaskGold': '0',
+        'adverId': '',
+        'token': '',
+        'extraGoldNum': '0',
+        'clickExtraGoldNum': '0',
+        'secondRewardFlag': '0',
+        'yyzdSecondRewardFlag': '0',
+        'surpriseType': '',
+        'mobile': phone,
+        'listenTime': 0,
+        'apiv': '10',
+        'unit': '',
+        'dynamicVer': '46',
+        'kver': '1',
+        'rewardType': '0',
+        'pFrom': '',
+    }
+    params.update(extra_params or {})
+    clean_params = {}
+    for key, value in params.items():
+        if value is None:
+            continue
+        clean_params[key] = value
+    return run_generic_task(title, URL_NEW_DO_LISTEN, clean_params, verbose=verbose)
+
+def run_everyday_do_listen_task(title, loginUid, loginSid, appUid, extra_params, verbose=True):
+    params = {
+        'loginUid': loginUid,
+        'loginSid': loginSid,
+        'appUid': appUid,
+    }
+    params.update(extra_params or {})
+    clean_params = {}
+    for key, value in params.items():
+        if value is None:
+            continue
+        clean_params[key] = value
+    return run_generic_task(title, URL_EVERYDAY_DO_LISTEN, clean_params, verbose=verbose)
+
+def query_user_asset(loginUid, loginSid, appUid, verbose=True):
+    params = {'loginUid': loginUid, 'loginSid': loginSid, 'appUid': appUid}
+    try:
+        response = requests.get(URL_USER_ASSET, headers=build_common_headers(), params=params, timeout=30, verify=False)
+        if response.status_code != 200:
+            if verbose:
+                print('❌ 资产查询失败: HTTP ' + str(response.status_code))
+            return {'success': False, 'score': 0}
+        result = response.json()
+        if result.get('code') != 200:
+            msg = str(result.get('msg', '未知错误'))
+            if verbose:
+                print('❌ 资产查询失败: ' + msg)
+            return {'success': False, 'score': 0}
+        data = result.get('data', {})
+        if not isinstance(data, dict):
+            data = {}
+        score = to_int(data.get('remainScore') or result.get('remainScore') or 0)
+        if verbose:
+            print('✅ 资产查询成功: 剩余金币 ' + str(score))
+        return {'success': True, 'score': score}
+    except Exception as e:
+        if verbose:
+            print('❌ 资产查询异常: ' + str(e))
+        return {'success': False, 'score': 0}
+
+def fetch_sign_list(loginUid, loginSid, appUid, extra_params=None, tag='签到列表'):
+    params = {'loginUid': loginUid, 'loginSid': loginSid, 'appUid': appUid}
+    params.update(extra_params or {})
+    try:
+        response = requests.get(URL_NEW_USER_SIGN_LIST, headers=build_common_headers(), params=params, timeout=30, verify=False)
+        if response.status_code != 200:
+            print('❌ ' + tag + '请求失败: HTTP ' + str(response.status_code))
+            return {'success': False, 'data': {}}
+        result = response.json()
+        if result.get('code') != 200:
+            msg = str(result.get('msg', '未知错误'))
+            print('❌ ' + tag + '请求失败: ' + msg)
+            return {'success': False, 'data': {}}
+        payload = result.get('data', {})
+        if not isinstance(payload, dict):
+            payload = {}
+        return {'success': True, 'data': payload}
+    except Exception as e:
+        print('❌ ' + tag + '异常: ' + str(e))
+        return {'success': False, 'data': {}}
+
+def fetch_dynamic_task_payload(loginUid, loginSid, appUid, first_payload):
+    if has_listen_task_config(first_payload):
+        return first_payload
+
+    dynamic_info = fetch_sign_list(
+        loginUid,
+        loginSid,
+        appUid,
+        extra_params={
+            'dynamicVer': '39',
+            'q36': '0302c7dcfc6616225938b018100018b19319',
+        },
+        tag='动态任务列表',
+    )
+    if dynamic_info.get('success'):
+        payload = dynamic_info.get('data', {})
+        dynamic_list = payload.get('dataList', [])
+        if has_listen_task_config(payload) or (isinstance(dynamic_list, list) and dynamic_list):
+            return payload
+
+    return first_payload
+
+def has_listen_task_config(task_payload):
+    data_list = task_payload.get('dataList', [])
+    if not isinstance(data_list, list):
+        return False
+
+    for item in data_list:
+        if not isinstance(item, dict):
+            continue
+        task_type = str(item.get('taskType') or '').strip().lower()
+        title = str(item.get('title') or '')
+        listen_list = item.get('listenList')
+        if task_type == 'listen' and isinstance(listen_list, list):
+            return True
+        if '听歌' in title and isinstance(listen_list, list):
+            return True
+        if isinstance(listen_list, list) and listen_list:
+            return True
+    return False
+
+def extract_listen_segment_candidates(task_payload):
+    data_list = task_payload.get('dataList', [])
+    if not isinstance(data_list, list):
+        return []
+
+    candidates = []
+    seen = set()
+
+    for item in data_list:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get('title') or '')
+        task_type = str(item.get('taskType') or '').strip().lower()
+        listen_list = item.get('listenList')
+        if not isinstance(listen_list, list):
+            continue
+        if not (task_type == 'listen' or '听歌' in title or listen_list):
+            continue
+
+        for idx, listen_item in enumerate(listen_list, 1):
+            if not isinstance(listen_item, dict):
+                continue
+            listen_time = listen_item.get('time')
+            unit = listen_item.get('unit')
+            gold = listen_item.get('goldNum')
+            extra_gold = listen_item.get('extraGoldNum')
+
+            if gold and str(gold).lower() != 'null':
+                key = ('g', str(listen_time or ''), str(unit or ''), str(gold))
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append({
+                        'kind': 'gold',
+                        'idx': idx,
+                        'params': {
+                            'from': 'listen',
+                            'goldNum': gold,
+                            'listenTime': listen_time,
+                            'unit': unit,
+                        },
+                    })
+
+            if extra_gold and str(extra_gold).lower() != 'null':
+                key = ('eg', str(listen_time or ''), '', str(extra_gold))
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append({
+                        'kind': 'extra',
+                        'idx': idx,
+                        'params': {
+                            'from': 'listen',
+                            'extraGoldNum': extra_gold,
+                            'listenTime': listen_time,
+                        },
+                    })
+
+    return candidates
+
+def run_creative_dynamic_tasks(loginUid, loginSid, appUid, encrypted_phone, reward_golds, verbose=True, stop_on_video_limit=False):
+    summary = {'total': 0, 'success': 0, 'done': 0, 'fail': 0, 'skip': 0, 'obtain': 0, 'video_limited': bool(stop_on_video_limit)}
+    unique_golds = []
+    for gold in reward_golds:
+        gold_value = to_int(gold)
+        if gold_value > 0 and gold_value not in unique_golds:
+            unique_golds.append(gold_value)
+
+    for idx, gold in enumerate(unique_golds, 1):
+        if summary['video_limited']:
+            summary['skip'] += 1
+            continue
+
+        summary['total'] += 1
+        result = run_new_do_listen_task(
+            '创意视频动态#' + str(idx),
+            loginUid,
+            loginSid,
+            appUid,
+            encrypted_phone,
+            {
+                'from': 'videoadver',
+                'adverSpace': '20130101',
+                'goldNum': str(gold),
+                'secondRewardFlag': '0',
+                'dynamicVer': '39',
+            },
+            verbose=verbose,
+        )
+        if result.get('success'):
+            if result.get('done'):
+                summary['done'] += 1
+            else:
+                summary['success'] += 1
+                summary['obtain'] += to_int(result.get('obtain') or 0)
+        else:
+            summary['fail'] += 1
+
+        description = str(result.get('description') or '')
+        if is_video_limit_like(description):
+            summary['video_limited'] = True
+        time.sleep(3)
+    return summary
+
+def run_missing_listen_tasks(loginUid, loginSid, appUid, encrypted_phone, verbose=True):
+    base_result = run_new_do_listen_task(
+        '每日听歌奖励',
+        loginUid,
+        loginSid,
+        appUid,
+        encrypted_phone,
+        {'goldNum': 18},
+        verbose=verbose,
+    )
+    extra_result = run_new_do_listen_task(
+        '每日听歌额外奖励',
+        loginUid,
+        loginSid,
+        appUid,
+        encrypted_phone,
+        {'extraGoldNum': 60},
+        verbose=verbose,
+    )
+    return {'base': base_result, 'extra': extra_result}
+
+def run_sign_task_chain(loginUid, loginSid, appUid, encrypted_phone):
+    sign_info = fetch_sign_list(loginUid, loginSid, appUid)
+    if not sign_info['success']:
+        return
+
+    payload = sign_info.get('data', {})
+    sign_flag = payload.get('isSign')
+    signed_today = sign_flag is True or str(sign_flag).strip().lower() in ['1', 'true', 'yes']
+
+    if signed_today:
+        print('⏭️ 今日已签到，跳过签到主链')
+    else:
+        run_new_do_listen_task('签到视频奖励(new)', loginUid, loginSid, appUid, encrypted_phone, {'from': 'sign', 'extraGoldNum': 110}, verbose=True)
+        run_everyday_do_listen_task('签到视频奖励(old)', loginUid, loginSid, appUid, {'from': 'sign', 'extraGoldNum': 110}, verbose=True)
+
+    base_results = run_missing_listen_tasks(loginUid, loginSid, appUid, encrypted_phone, verbose=True)
+    extra_video_limited = is_video_limit_like(base_results.get('extra', {}).get('description', ''))
+
+    task_payload = fetch_dynamic_task_payload(loginUid, loginSid, appUid, payload)
+    candidates = extract_listen_segment_candidates(task_payload)
+    if not candidates:
+        print('⏭️ 听歌分段任务: 未发现分段配置（listenList为空或结构变更）')
+        return
+
+    attempt_count = 0
+    for candidate in candidates:
+        if candidate.get('kind') == 'extra' and extra_video_limited:
+            continue
+
+        attempt_count += 1
+        title = '听歌任务#' + str(candidate.get('idx'))
+        if candidate.get('kind') == 'extra':
+            title = '听歌额外#' + str(candidate.get('idx'))
+        result = run_new_do_listen_task(
+            title,
+            loginUid,
+            loginSid,
+            appUid,
+            encrypted_phone,
+            candidate.get('params') or {},
+            verbose=True,
+        )
+        if candidate.get('kind') == 'extra' and is_video_limit_like(result.get('description')):
+            extra_video_limited = True
+
+    if attempt_count == 0:
+        print('⏭️ 听歌分段任务: 可尝试项仅含额外视频奖励，当前视频次数受限')
+
+def run_coin_accumulation_tasks(loginUid, loginSid, appUid, encrypted_phone):
+    for task_id in [1, 2, 3]:
+        run_new_do_listen_task(
+            '累计奖励任务' + str(task_id),
+            loginUid,
+            loginSid,
+            appUid,
+            encrypted_phone,
+            {'from': 'coinAccumulationTask', 'taskId': task_id},
+        )
+        time.sleep(2)
+
+def run_freemium_watch(loginUid, verbose=True):
+    summary = {'success_count': 0, 'rounds': 0, 'total_minutes': 0, 'last_expiry': ''}
+    if not str(loginUid).isdigit():
+        if verbose:
+            print('  ❌ loginUid 非数字，已跳过')
+        return summary
+
+    rounds = to_int(os.getenv('KUWO_FREEMIUM_LOOP', '1'))
+    if rounds <= 0:
+        rounds = 1
+    if rounds > 10:
+        rounds = 10
+    summary['rounds'] = rounds
+
+    headers = {
+        'Content-Type': 'application/json;charset=utf-8',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/134.0.6998.135 Mobile Safari/537.36/ kuwopage',
+        'Accept': 'application/json, text/plain, */*',
+    }
+
+    for idx in range(rounds):
+        req_id = ''.join(random.choices(string.hexdigits.lower(), k=32))
+        url = FREEMIUM_SWITCH_URL + '?reqId=' + req_id
+        body = {'loginUid': int(loginUid), 'status': 1}
+        try:
+            response = requests.post(url, headers=headers, json=body, timeout=30, verify=False)
+            if response.status_code != 200:
+                if verbose:
+                    print('  第' + str(idx + 1) + '/' + str(rounds) + '次 ❌ HTTP ' + str(response.status_code))
+                continue
+            result = response.json()
+            if result.get('code') == 200:
+                data = result.get('data', {})
+                if not isinstance(data, dict):
+                    data = {}
+                single_time = to_int(data.get('singleTime') or 0)
+                end_time = to_int(data.get('endTime') or 0)
+                expiry_text = ''
+                if end_time > 0:
+                    if end_time < 10**12:
+                        end_time *= 1000
+                    expiry_text = datetime.fromtimestamp(end_time / 1000).strftime('%Y-%m-%d %H:%M:%S')
+                    summary['last_expiry'] = expiry_text
+                summary['success_count'] += 1
+                summary['total_minutes'] += single_time
+                if verbose:
+                    if expiry_text:
+                        print('  第' + str(idx + 1) + '/' + str(rounds) + '次 ✅ +' + str(single_time) + ' 分钟, 到期 ' + expiry_text)
+                    else:
+                        print('  第' + str(idx + 1) + '/' + str(rounds) + '次 ✅ +' + str(single_time) + ' 分钟')
+            else:
+                msg = str(result.get('msg', '未知错误'))
+                if verbose:
+                    print('  第' + str(idx + 1) + '/' + str(rounds) + '次 ❌ ' + msg)
+                if is_done_like(msg):
+                    break
+        except Exception as e:
+            if verbose:
+                print('  第' + str(idx + 1) + '/' + str(rounds) + '次 ❌ ' + str(e))
+
+    if verbose:
+        summary_line = '  汇总: 成功 ' + str(summary['success_count']) + '/' + str(rounds) + ', 累计 ' + str(summary['total_minutes']) + ' 分钟'
+        if summary['last_expiry']:
+            summary_line += ', 到期 ' + summary['last_expiry']
+        print(summary_line)
+    return summary
+
+def print_banner():
+    print('\n        免责声明:\n仅供学习与接口研究，请在法律法规允许范围内使用并自行承担风险。\n    ')
+
+def check_expiration():
+    expiration_time = datetime(2099, 5, 1, 19, 0, 0)
+    current_time = datetime.now()
+    if current_time > expiration_time:
+        print('\n============================================================')
+        print('脚本已过期，请更新到新版本后再运行')
+        print('============================================================')
+        return False
+    return True
+
+def push_plus_send(title, content, force=False):
+    """通过PushPlus推送消息"""
+    # 优先读取环境变量，如果未设置则使用默认值
+    token = os.getenv('PUSH_PLUS_TOKEN', '')
+    if not token:
+        print('⚠️ 未配置 PUSH_PLUS_TOKEN 环境变量，跳过推送')
+        return False
+    try:
+        url = 'http://www.pushplus.plus/send'
+        data = {
+            'token': token,
+            'title': title,
+            'content': content,
+            'template': 'txt'
+        }
+        response = requests.post(url, json=data, timeout=10)
+        result = response.json()
+        if result.get('code') == 200:
+            print('✅ PushPlus推送成功')
+            return True
+        else:
+            print('❌ PushPlus推送失败: ' + str(result.get('msg', '未知错误')))
+            return False
+    except Exception as e:
+        print('❌ PushPlus推送异常: ' + str(e))
+        return False
+
+def should_push():
+    """判断是否应该推送（12:00-12:15 和 23:55-23:59 窗口推送，或设置FORCE_PUSH=1强制推送）"""
+    # 支持强制推送：设置环境变量 FORCE_PUSH=1 即可忽略时间限制
+    if os.getenv('FORCE_PUSH', '') == '1':
+        return True
+    now = datetime.now()
+    # 中午窗口: 12:00-12:15
+    if now.hour == 12 and 0 <= now.minute <= 15:
+        return True
+    # 晚间窗口: 23:55-23:59
+    if now.hour == 23 and now.minute >= 55:
+        return True
+    return False
+
+# 当天累计金币存储相关函数
+DAILY_GOLD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'daily_gold_data.json')
+
+def get_daily_gold_data():
+    """获取当天累计金币数据"""
+    today = datetime.now().strftime('%Y-%m-%d')
+    try:
+        if os.path.exists(DAILY_GOLD_FILE):
+            with open(DAILY_GOLD_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # 检查是否是今天的数据，如果是则返回，否则返回空字典
+                if data.get('date') == today:
+                    return data
+        return {'date': today, 'total_gold': 0, 'accounts': {}}
+    except Exception:
+        return {'date': today, 'total_gold': 0, 'accounts': {}}
+
+def save_daily_gold_data(data):
+    """保存当天累计金币数据"""
+    try:
+        with open(DAILY_GOLD_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print('⚠️ 保存累计金币数据失败: ' + str(e))
+
+def update_daily_gold(phone, earned_gold):
+    """更新当天累计金币"""
+    data = get_daily_gold_data()
+    phone_last4 = phone[-4:] if len(phone) > 4 else phone
+    
+    if phone_last4 not in data['accounts']:
+        data['accounts'][phone_last4] = 0
+    
+    data['accounts'][phone_last4] += earned_gold
+    data['total_gold'] += earned_gold
+    
+    save_daily_gold_data(data)
+    return data['accounts'][phone_last4], data['total_gold']
+
+def run_all_accounts(accounts=None):
+
+        print('============================================================')
+        print_banner()
+        print('============================================================')
+        if accounts is None:
+            accounts = get_accounts()
+        if not accounts:
+            print('\n❌ 未读取到有效账号')
+            return
+        print('\n📱 获取到 ' + str(len(accounts)) + ' 个账号')
+    
+        # 用于收集各账号金币统计
+        account_gold_stats = []
+    
+        for i, account in enumerate(accounts, 1):
+            phone = account['phone']
+            password = account['password']
+            print('\n' + '==================================================')
+            print('👤 账号 ' + str(i) + '/' + str(len(accounts)) + ': ' + str(phone))
+            print('==================================================')
+            encrypted_phone = encrypt_phone(phone)
+            q_value, test_encrypted_dev_id = get_q(phone, password)
+            print('用户名: ' + str(phone))
+            result = login(phone, password)
+        
+            # 记录该账号起始金币
+            start_gold = 0
+            end_gold = 0
+            total_earned = 0
+        
+            if result:
+                loginUid, loginSid, username, appUid, encrypted_dev_id = result
+                print('✅ 登录成功!')
+                print('\n【1】资产查询:')
+                asset_result = query_user_asset(loginUid, loginSid, appUid, verbose=False)
+                if asset_result.get('success'):
+                    start_gold = asset_result.get('score', 0)
+                    print('  结果: ✅ 剩余金币 ' + str(start_gold))
+                else:
+                    print('  结果: ❌ 查询失败')
+                print('\n【2】签到听歌任务链:')
+                run_sign_task_chain(loginUid, loginSid, appUid, encrypted_phone)
+                print('\n【3】累计奖励任务:')
+                run_coin_accumulation_tasks(loginUid, loginSid, appUid, encrypted_phone)
+                print('\n【4】开宝箱:')
+                box_result = open_treasure_box(loginUid, loginSid, appUid, encrypted_dev_id, gold_num=20, verbose=False)
+                if box_result['success']:
+                    print('  结果: ✅ +' + str(box_result.get('obtain', 0)) + ' 金币')
+                else:
+                    print('  结果: ❌ ' + str(box_result['description']))
+                print('\n【4.1】活动宝箱:')
+                activity_box_result = run_activity_box_task(loginUid, loginSid, verbose=False)
+                if activity_box_result.get('success'):
+                    if activity_box_result.get('done'):
+                        print('  结果: ⏭️ ' + str(activity_box_result.get('description', '已完成')))
+                    else:
+                        print('  结果: ✅ +' + str(activity_box_result.get('obtain', 0)) + ' 金币')
+                else:
+                    print('  结果: ❌ ' + str(activity_box_result.get('description', '失败')))
+                print('\n【4.2】时段宝箱补领:')
+                run_box_renew_tasks(loginUid, loginSid, gold_num=30, verbose=True)
+                print('\n【5】看视频拆红包:')
+                ad_success_count = 0
+                ad_total_gold = 0
+                for j in range(30):
+                    ad_result = open_guanggao(loginUid, loginSid, appUid, encrypted_dev_id, 208, encrypted_phone, verbose=False)
+                    round_idx = j + 1
+                    if ad_result['success']:
+                        obtain = to_int(ad_result.get('obtain') or 0)
+                        ad_success_count += 1
+                        ad_total_gold += obtain
+                        print('  第' + str(round_idx) + '/30次 ✅ +' + str(obtain) + ' 金币')
+                    else:
+                        print('  第' + str(round_idx) + '/30次 ❌ ' + str(ad_result['description']))
+                        if is_done_like(ad_result.get('description')):
+                            break
+                    time.sleep(5)
+                print('  汇总: 成功 ' + str(ad_success_count) + '/30, 累计 ' + str(ad_total_gold) + ' 金币')
+                print('\n【6】整点领金币:')
+                clock_result = clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, encrypted_phone, verbose=False)
+                if clock_result['success']:
+                    if clock_result.get('done'):
+                        print('  结果: ⏭️ ' + str(clock_result.get('description', '已完成')))
+                    else:
+                        print('  结果: ✅ +' + str(clock_result.get('obtain', 0)) + ' 金币')
+                else:
+                    print('  结果: ❌ ' + str(clock_result['description']))
+                print('\n【8】免费抽奖:')
+                lottery_result = lottery_draw(loginUid, loginSid, appUid, verbose=False)
+                if lottery_result['success']:
+                    reward_name = str(lottery_result.get('reward_name') or lottery_result.get('message') or '成功')
+                    free_obtain = to_int(lottery_result.get('obtain') or 0)
+                    if free_obtain > 0:
+                        print('  结果: ✅ ' + reward_name + ' (+' + str(free_obtain) + ' 金币)')
+                    else:
+                        print('  结果: ✅ ' + reward_name)
+                else:
+                    print('  结果: ❌ ' + str(lottery_result['message']))
+                print('\n【9】广告抽奖:')
+                lottery_video_success = 0
+                lottery_video_total_gold = 0
+                for j in range(9):
+                    lottery_result = lottery_draw(loginUid, loginSid, appUid, lottery_type='video', verbose=False)
+                    round_idx = j + 1
+                    if lottery_result['success']:
+                        reward_name = str(lottery_result.get('reward_name') or lottery_result.get('message') or '成功')
+                        obtain = to_int(lottery_result.get('obtain') or 0)
+                        lottery_video_success += 1
+                        lottery_video_total_gold += obtain
+                        if obtain > 0:
+                            print('  第' + str(round_idx) + '/9次 ✅ ' + reward_name + ' (+' + str(obtain) + ' 金币)')
+                        else:
+                            print('  第' + str(round_idx) + '/9次 ✅ ' + reward_name)
+                    else:
+                        print('  第' + str(round_idx) + '/9次 ❌ ' + str(lottery_result['message']))
+                        if is_done_like(lottery_result.get('message')):
+                            break
+                    time.sleep(5)
+                print('  汇总: 成功 ' + str(lottery_video_success) + '/9, 累计 ' + str(lottery_video_total_gold) + ' 金币')
+                print('\n【10】观看惊喜广告:')
+                surprise_success_count = 0
+                surprise_total_gold = 0
+                for j in range(5):
+                    surprise_result = watch_surprise_ad(loginUid, loginSid, appUid, encrypted_dev_id, encrypted_phone, verbose=False)
+                    round_idx = j + 1
+                    if surprise_result['success']:
+                        obtain = to_int(surprise_result.get('obtain') or 0)
+                        surprise_success_count += 1
+                        surprise_total_gold += obtain
+                        print('  第' + str(round_idx) + '/5次 ✅ +' + str(obtain) + ' 金币')
+                    else:
+                        print('  第' + str(round_idx) + '/5次 ❌ ' + str(surprise_result['description']))
+                        if is_done_like(surprise_result.get('description')):
+                            break
+                    time.sleep(5)
+                print('  汇总: 成功 ' + str(surprise_success_count) + '/5, 累计 ' + str(surprise_total_gold) + ' 金币')
+                print('\n【11】免费听歌时长任务:')
+                run_freemium_watch(loginUid, verbose=True)
+            
+                # 再次查询金币
+                final_asset = query_user_asset(loginUid, loginSid, appUid, verbose=False)
+                if final_asset.get('success'):
+                    end_gold = final_asset.get('score', 0)
+                    total_earned = end_gold - start_gold
+                    print('\n  📊 本次任务金币变化: ' + str(start_gold) + ' -> ' + str(end_gold) + ' (+' + str(total_earned) + ')')
+            
+                # 收集统计信息
+                account_gold_stats.append({
+                    'phone': phone[-4:] if len(phone) > 4 else phone,
+                    'start_gold': start_gold,
+                    'end_gold': end_gold,
+                    'earned': total_earned
+                })
+            
+                # 更新当天累计金币
+                if total_earned > 0:
+                    acc_today, total_today = update_daily_gold(phone, total_earned)
+                    print(f'  📊 当天累计: 账号 +{acc_today}, 全部 +{total_today}')
+            else:
+                print('❌ 登录失败，跳过后续测试')
+                account_gold_stats.append({
+                    'phone': phone[-4:] if len(phone) > 4 else phone,
+                    'start_gold': 0,
+                    'end_gold': 0,
+                    'earned': 0,
+                    'error': '登录失败'
+                })
+            if i < len(accounts):
+                print('\n⏳ 账号切换等待 10 秒...')
+                time.sleep(5)
+        print('\n============================================================')
+        print('全部账号任务执行结束')
+        print('============================================================')
+    
+        # 显示每个账号统计总数
+        print('\n============================================================')
+        print('📊 各账号统计汇总')
+        print('============================================================')
+        now = datetime.now()
+        print(f'📅 统计时间: {now.strftime("%Y-%m-%d %H:%M")}')
+        print('')
+    
+        total_all_gold = 0
+        total_earned_all = 0
+    
+        # 获取当天累计金币数据
+        daily_data = get_daily_gold_data()
+    
+        for idx, stat in enumerate(account_gold_stats, 1):
+            print(f'📱 账号{idx} ({stat["phone"]}):')
+            if 'error' in stat:
+                print(f'   ❌ {stat["error"]}')
+            else:
+                print(f'   起始金币: {stat["start_gold"]}')
+                print(f'   当前金币: {stat["end_gold"]}')
+                print(f'   本次获得: +{stat["earned"]}')
+                # 显示该账号当天累计
+                acc_today = daily_data.get('accounts', {}).get(stat["phone"], 0)
+                if acc_today > 0:
+                    print(f'   当天累计: +{acc_today}')
+            total_all_gold += stat.get('end_gold', 0)
+            total_earned_all += stat.get('earned', 0)
+            print('')
+    
+        print('=' * 40)
+        print(f'💰 全部账号金币总计: {total_all_gold}')
+        print(f'📈 全部账号本次获得: +{total_earned_all}')
+    
+        # 显示当天累计金币
+        daily_data = get_daily_gold_data()
+        if daily_data['total_gold'] > 0:
+            print('')
+            print(f'🌟 当天累计获得: +{daily_data["total_gold"]}')
+            print('📊 各账号当天累计:')
+            for acc_phone, acc_gold in daily_data.get('accounts', {}).items():
+                print(f'   账号{acc_phone}: +{acc_gold}')
+        print('============================================================')
+    
+        # 仅在12点推送统计结果
+        if should_push() and account_gold_stats:
+            print('\n📤 正在推送金币统计到PushPlus...')
+            now = datetime.now()
+            title = f'酷我音乐金币统计 {now.strftime("%Y-%m-%d")}'
+        
+            content_lines = [f'📅 统计时间: {now.strftime("%Y-%m-%d %H:%M")}', '']
+            total_all_gold = 0
+            total_earned_all = 0
+        
+            # 获取当天累计金币数据
+            daily_data = get_daily_gold_data()
+        
+            for idx, stat in enumerate(account_gold_stats, 1):
+                content_lines.append(f'📱 账号{idx} ({stat["phone"]}):')
+                if 'error' in stat:
+                    content_lines.append(f'   ❌ {stat["error"]}')
+                else:
+                    content_lines.append(f'   起始金币: {stat["start_gold"]}')
+                    content_lines.append(f'   当前金币: {stat["end_gold"]}')
+                    content_lines.append(f'   本次获得: +{stat["earned"]}')
+                    # 显示该账号当天累计
+                    acc_today = daily_data.get('accounts', {}).get(stat["phone"], 0)
+                    if acc_today > 0:
+                        content_lines.append(f'   当天累计: +{acc_today}')
+                total_all_gold += stat.get('end_gold', 0)
+                total_earned_all += stat.get('earned', 0)
+                content_lines.append('')
+        
+            content_lines.append('=' * 30)
+            content_lines.append(f'💰 全部账号金币总计: {total_all_gold}')
+            content_lines.append(f'📈 全部账号本次获得: +{total_earned_all}')
+        
+            # 添加当天累计金币统计
+            if daily_data['total_gold'] > 0:
+                content_lines.append(f'🌟 当天累计获得: +{daily_data["total_gold"]}')
+        
+            content = '\n'.join(content_lines)
+            push_plus_send(title, content)
+
+    # 当前脚本来自于 http://script.345yun.cn 脚本库下载！
+    # 当前脚本来自于 http://2.345yun.cn 脚本库下载！
+    # 当前脚本来自于 http://2.345yun.cc 脚本库下载！
+    # 脚本库官方QQ群1群: 429274456
+    # 脚本库官方QQ群2群: 1077801222
+    # 脚本库官方QQ群3群: 433030897
+    # 脚本库中的所有脚本文件均来自热心网友上传和互联网收集。
+    # 脚本库仅提供文件上传和下载服务，不提供脚本文件的审核。
+    # 您在使用脚本库下载的脚本时自行检查判断风险。
+    # 所涉及到的 账号安全、数据泄露、设备故障、软件违规封禁、财产损失等问题及法律风险，与脚本库无关！均由开发者、上传者、使用者自行承担。
+
+
+# ============================================================
+# 以下为增强层：config.json 账号管理 + Web 面板 + 内置定时
+# ============================================================
+import io
+import argparse
+import threading as _th
+import contextlib as _cl
+import datetime as _dt
+
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"settings": {}, "accounts": []}
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print('⚠️ 保存配置失败: ' + str(e))
+
+def get_accounts():
+    """账号来源：config.json > 环境变量 kwyy（手机号#密码）"""
+    cfg = load_config()
+    accounts = [a for a in cfg.get('accounts', []) if a.get('phone') and a.get('password')]
+    for a in get_accounts_from_env():
+        if not any(x['phone'] == a['phone'] for x in accounts):
+            accounts.append(a)
+    return accounts
+
+# ---- 运行日志捕获 ----
+_LOG = []
+_LOG_LOCK = _th.Lock()
+_RUN = {"flag": False, "last": None, "next": None}
+
+class _LogCap(io.StringIO):
+    def write(self, s):
+        with _LOG_LOCK:
+            _LOG.append(s)
+            if len(_LOG) > 3000:
+                del _LOG[:1500]
+        return len(s)
+
+def run_worker():
+    _RUN["flag"] = True
+    _RUN["last"] = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with _cl.redirect_stdout(_LogCap()):
+            run_all_accounts()
+    finally:
+        _RUN["flag"] = False
+
+# ---- Web 面板 ----
+try:
+    from flask import Flask, request, jsonify, Response
+    _HAVE_FLASK = True
+except Exception:
+    _HAVE_FLASK = False
+
+if _HAVE_FLASK:
+    app = Flask(__name__)
 
     @app.route("/")
     def index():
-        return render_template_string(DASH, token=request.args.get("token", PW))
+        cfg = load_config()
+        accts = get_accounts()
+        rows = "".join(
+            "<tr><td>%s</td><td>%s</td></tr>" % (a.get('phone','?'), '******' if a.get('password') else '')
+            for a in accts
+        ) if accts else "<tr><td colspan='2'>暂无账号，请在下方添加</td></tr>"
+        html = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>酷我音乐自动任务</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:860px;margin:20px auto;padding:0 16px;color:#222}
+h1{font-size:20px}.card{background:#f7f8fa;border:1px solid #e5e7eb;border-radius:10px;padding:14px;margin:12px 0}
+button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;margin-right:8px}
+input{padding:6px 8px;border:1px solid #ccc;border-radius:6px;width:200px;margin:4px 6px 4px 0}
+pre{background:#0b1021;color:#d6e2ff;padding:12px;border-radius:8px;max-height:360px;overflow:auto;white-space:pre-wrap;font-size:12px}
+table{width:100%%;border-collapse:collapse}td,th{border:1px solid #e5e7eb;padding:6px 8px;text-align:left}
+.hint{color:#666;font-size:13px}</style></head><body>
+<h1>酷我音乐自动任务 <span class="hint">(仅调用酷我官方接口)</span></h1>
+<div class="card">
+  <div>状态：%s ｜ 上次运行：%s ｜ 下次定时：%s</div>
+  <div style="margin-top:10px">
+    <button onclick="runNow()">立即运行全部</button>
+    <button onclick="location.reload()">刷新</button>
+  </div>
+</div>
+<div class="card">
+  <h3>账号列表（仅手机号+密码）</h3>
+  <table><tr><th>手机号</th><th>密码</th></tr>%s</table>
+  <h3 style="margin-top:14px">新增/修改账号</h3>
+  <div>
+    <input id="phone" placeholder="手机号"><input id="password" placeholder="密码" type="password">
+    <button onclick="addAcct()">保存账号</button>
+    <button onclick="delAcct()">删除该手机号</button>
+  </div>
+  <div class="hint">格式同样支持环境变量 kwyy="手机号#密码&手机号2#密码2"</div>
+</div>
+<div class="card"><h3>运行日志</h3><pre id="log">加载中...</pre></div>
+<script>
+function runNow(){fetch('/api/run',{method:'POST'}).then(r=>r.json()).then(d=>alert(d.msg))}
+function addAcct(){const p=phone.value.trim(),w=password.value;if(!p||!w){alert('请填手机号和密码');return}
+fetch('/api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:p,password:w})}).then(r=>r.json()).then(d=>{alert(d.msg);location.reload()})}
+function delAcct(){const p=phone.value.trim();if(!p){alert('填要删除的手机号');return}
+fetch('/api/accounts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:p})}).then(r=>r.json()).then(d=>{alert(d.msg);location.reload()})}
+function loadLog(){fetch('/api/logs').then(r=>r.text()).then(t=>document.getElementById('log').textContent=t)}
+setInterval(loadLog,4000);loadLog();
+</script></body></html>""" % (
+            ("运行中" if _RUN["flag"] else "空闲"),
+            _RUN["last"] or "—",
+            _RUN["next"] or "—",
+            rows,
+        )
+        return html
 
     @app.route("/api/status")
     def api_status():
-        accs = [HISTORY.get(a.get("phone", "?"), {"phone": a.get("phone", "?")}) for a in ACCOUNTS]
-        mode = SETTINGS.get("interval_mode", "daily")
-        if mode == "interval":
-            nxt = f"每 {SETTINGS.get('interval_minutes',120)} 分钟"
-        else:
-            nxt = f"每天 {SETTINGS.get('schedule','09:00')}"
-        return jsonify({"accounts": accs, "next_run": nxt, "running": run_lock.locked()})
+        return jsonify({
+            "running": _RUN["flag"], "last": _RUN["last"], "next": _RUN["next"],
+            "accounts": [a.get('phone') for a in get_accounts()],
+        })
 
     @app.route("/api/run", methods=["POST"])
     def api_run():
-        force = request.args.get("force") == "1" or (request.get_json(silent=True) or {}).get("force")
-        threading.Thread(target=lambda: run_all(force=bool(force)), daemon=True).start()
-        return jsonify({"msg": "已触发运行" + ("(强制)" if force else "")})
+        if not _RUN["flag"]:
+            _th.Thread(target=run_worker, daemon=True).start()
+            return jsonify({"msg": "已触发运行"})
+        return jsonify({"msg": "正在运行中，请稍后再试"})
 
     @app.route("/api/accounts", methods=["GET", "POST", "DELETE"])
     def api_accounts():
-        global ACCOUNTS
+        cfg = load_config()
         if request.method == "GET":
-            return jsonify({"accounts": ACCOUNTS})
+            return jsonify(get_accounts())
         if request.method == "POST":
             b = request.get_json(silent=True) or {}
-            if not all(k in b for k in ("appuid", "devid", "q")):
-                return jsonify({"msg": "缺少 appuid/devid/q"}), 400
-            ACCOUNTS.append({"appuid": b["appuid"], "devid": b["devid"],
-                             "q": b["q"], "phone": b.get("phone", "?")})
-            save_config()
-            return jsonify({"msg": "账号已添加"})
+            if not b.get("phone") or not b.get("password"):
+                return jsonify({"msg": "缺少手机号或密码"}), 400
+            accts = cfg.setdefault("accounts", [])
+            for a in accts:
+                if a.get("phone") == b["phone"]:
+                    a["password"] = b["password"]; break
+            else:
+                accts.append({"phone": b["phone"], "password": b["password"]})
+            save_config(cfg)
+            return jsonify({"msg": "账号已保存"})
         if request.method == "DELETE":
-            phone = (request.get_json(silent=True) or {}).get("phone")
-            ACCOUNTS = [a for a in ACCOUNTS if a.get("phone") != phone]
-            save_config()
+            b = request.get_json(silent=True) or {}
+            accts = cfg.get("accounts", [])
+            cfg["accounts"] = [a for a in accts if a.get("phone") != b.get("phone")]
+            save_config(cfg)
             return jsonify({"msg": "账号已删除"})
 
     @app.route("/api/logs")
     def api_logs():
+        with _LOG_LOCK:
+            return Response("".join(_LOG), mimetype="text/plain; charset=utf-8")
+
+def schedule_loop():
+    while True:
+        cfg = load_config()
+        sched = (cfg.get("settings") or {}).get("schedule", "09:00")
         try:
-            with open(LOG_PATH, "r", encoding="utf-8") as f:
-                lines = f.readlines()[-200:]
-            return "".join(lines)
+            hh, mm = sched.split(":")
+            target = _dt.datetime.now().replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
         except Exception:
-            return ""
+            target = _dt.datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+        now = _dt.datetime.now()
+        if target <= now:
+            target = target + _dt.timedelta(days=1)
+        _RUN["next"] = target.strftime("%Y-%m-%d %H:%M")
+        time.sleep(max(1, (target - now).total_seconds()))
+        if not _RUN["flag"]:
+            _th.Thread(target=run_worker, daemon=True).start()
 
-    return app
-
-
-# ===================== 入口 =====================
 def main():
-    import argparse
-    p = argparse.ArgumentParser(description="酷我音乐自动签到（去毒·服务器·Web 面板版）")
+    p = argparse.ArgumentParser()
     p.add_argument("--server", action="store_true", help="启动 Web 面板 + 每日定时调度")
     p.add_argument("--once", action="store_true", help="立即执行一次后退出")
-    p.add_argument("--loop", action="store_true", help="常驻，每 2 小时一轮（旧模式）")
-    p.add_argument("--force", action="store_true", help="忽略今日去重强制重跑")
-    p.add_argument("--host", default=None, help="Web 监听地址（覆盖配置）")
-    p.add_argument("--port", type=int, default=None, help="Web 端口（覆盖配置）")
-    p.add_argument("--schedule", default=None, help="每天运行时间，如 09:00")
-    args = p.parse_args()
-
-    load_config()
-    load_history()
-    if args.schedule:
-        SETTINGS["schedule"] = args.schedule
-        SETTINGS["interval_mode"] = "daily"
-
-    if not (args.server or args.once or args.loop):
-        args.once = True
-
-    if args.server:
-        host = args.host or SETTINGS.get("web_host", "0.0.0.0")
-        port = args.port or SETTINGS.get("web_port", 8080)
-        log.info("启动 Web 面板：http://%s:%s  (token=%s)", host, port,
-                 SETTINGS.get("web_password") or "无")
-        t = threading.Thread(target=scheduler_loop, daemon=True)
-        t.start()
-        app = make_app()
-        app.run(host=host, port=port, threaded=True)
-    elif args.loop:
-        log.info("常驻模式：每 2 小时一轮（按 --force 可忽略去重）")
+    p.add_argument("--loop", action="store_true", help="常驻，每 2 小时一轮")
+    a = p.parse_args()
+    if a.once:
+        run_all_accounts()
+    elif a.server:
+        if not _HAVE_FLASK:
+            print("❌ 缺少 flask，请 pip install flask")
+            return
+        _th.Thread(target=schedule_loop, daemon=True).start()
+        cfg = load_config()
+        host = (cfg.get("settings") or {}).get("web_host", "0.0.0.0")
+        port = int((cfg.get("settings") or {}).get("web_port", 8080))
+        print("🌐 Web 面板已启动: http://%s:%d" % (host, port))
+        app.run(host=host, port=port, debug=False, use_reloader=False)
+    elif a.loop:
         while True:
-            run_all(force=args.force)
-            time.sleep(2 * 3600)
-    else:  # --once
-        run_all(force=args.force)
-
+            run_all_accounts()
+            time.sleep(7200)
+    else:
+        run_all_accounts()
 
 if __name__ == "__main__":
     main()

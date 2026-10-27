@@ -1,26 +1,12 @@
 {
   "settings": {
     "schedule": "09:00",
-    "interval_mode": "daily",
-    "interval_minutes": 120,
-    "min_delay": 15,
-    "max_delay": 25,
-    "max_retry": 1,
     "web_host": "0.0.0.0",
     "web_port": 8080,
     "web_password": "",
-    "push": {
-      "type": "none",
-      "url": "",
-      "token": ""
-    }
+    "push": { "type": "none" }
   },
   "accounts": [
-    {
-      "appuid": "在此填入抓包得到的 appuid",
-      "devid": "在此填入抓包得到的 devid",
-      "q": "在此填入抓包得到的 q（登录票据）",
-      "phone": "13800000000"
-    }
+    { "phone": "13800000000", "password": "你的酷我账号密码" }
   ]
 }
