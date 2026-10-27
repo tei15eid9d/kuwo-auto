@@ -1198,10 +1198,15 @@ def check_expiration():
 
 def push_plus_send(title, content, force=False):
     """通过PushPlus推送消息"""
-    # 优先读取环境变量，如果未设置则使用默认值
+    # 来源优先级: 环境变量 PUSH_PLUS_TOKEN > 面板/config.json 的 settings.push.pushplus_token
     token = os.getenv('PUSH_PLUS_TOKEN', '')
     if not token:
-        print('⚠️ 未配置 PUSH_PLUS_TOKEN 环境变量，跳过推送')
+        try:
+            token = ((load_config().get('settings') or {}).get('push') or {}).get('pushplus_token') or ''
+        except Exception:
+            token = ''
+    if not token:
+        print('⚠️ 未配置 PushPlus token（环境变量或面板），跳过推送')
         return False
     try:
         url = 'http://www.pushplus.plus/send'
@@ -1807,6 +1812,18 @@ if _HAVE_FLASK:
             "<tr><td>%s</td><td>%s</td></tr>" % (a.get('phone','?'), '******' if a.get('password') else '')
             for a in accts
         ) if accts else "<tr><td colspan='2'>暂无账号，请在下方添加</td></tr>"
+        # 推送配置（供面板回填）
+        push_cfg = (cfg.get("settings") or {}).get("push") or {}
+        wx_cfg = push_cfg.get("wxpusher") or {}
+        push_type = str(push_cfg.get("type") or "none").strip().lower()
+        app_token_val = wx_cfg.get("app_token") or ""
+        topic_ids_val = ",".join(str(x) for x in (wx_cfg.get("topic_ids") or []))
+        pp_token_val = (push_cfg.get("pushplus_token") or os.getenv("PUSH_PLUS_TOKEN", ""))
+        def _sel(t):
+            return " selected" if push_type == t else ""
+        def _esc(s):
+            return (str(s).replace('&', '&amp;').replace('"', '&quot;')
+                    .replace("'", '&#39;').replace('<', '&lt;').replace('>', '&gt;'))
         html = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>酷我音乐自动任务</title>
@@ -1836,6 +1853,31 @@ table{width:100%%;border-collapse:collapse}td,th{border:1px solid #e5e7eb;paddin
   </div>
   <div class="hint">格式同样支持环境变量 kwyy="手机号#密码&手机号2#密码2"</div>
 </div>
+<div class="card">
+  <h3>消息推送设置</h3>
+  <div style="margin:6px 0">
+    <span class="hint">推送方式：</span>
+    <select id="push_type">
+      <option value="none"%s>关闭</option>
+      <option value="wxpusher"%s>WxPusher（微信）</option>
+      <option value="pushplus"%s>PushPlus</option>
+    </select>
+  </div>
+  <div style="margin:6px 0"><span class="hint">WxPusher appToken（AT_ 开头）</span><br>
+    <input id="app_token" placeholder="AT_xxxxxxxx" style="width:340px" value="%s"></div>
+  <div style="margin:6px 0"><span class="hint">主题ID（多个用英文逗号分隔，如 48125）</span><br>
+    <input id="topic_ids" placeholder="48125" style="width:340px" value="%s"></div>
+  <div style="margin:6px 0"><span class="hint">PushPlus token（选 PushPlus 时才用）</span><br>
+    <input id="pp_token" placeholder="PushPlus 的 token" style="width:340px" value="%s"></div>
+  <div style="margin-top:10px">
+    <button onclick="savePush()">保存推送配置</button>
+    <button onclick="testPush()">发一条测试消息</button>
+  </div>
+  <div class="hint" style="margin-top:8px">
+    ⚠️ appToken 必须和主题ID属于<b>同一个 WxPusher 应用</b>，否则会提示「没有权限给topic发送消息」。<br>
+    每日自动推送时间：12:00-12:15 与 23:55-23:59。要想每次运行都推，启动时加环境变量 FORCE_PUSH=1。
+  </div>
+</div>
 <div class="card"><h3>运行日志</h3><pre id="log">加载中...</pre></div>
 <script>
 function runNow(){fetch('/api/run',{method:'POST'}).then(r=>r.json()).then(d=>alert(d.msg))}
@@ -1844,6 +1886,17 @@ fetch('/api/accounts',{method:'POST',headers:{'Content-Type':'application/json'}
 function delAcct(){const p=phone.value.trim();if(!p){alert('填要删除的手机号');return}
 fetch('/api/accounts',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:p})}).then(r=>r.json()).then(d=>{alert(d.msg);location.reload()})}
 function loadLog(){fetch('/api/logs').then(r=>r.text()).then(t=>document.getElementById('log').textContent=t)}
+function savePush(){
+  const body={type:document.getElementById('push_type').value,
+              app_token:document.getElementById('app_token').value.trim(),
+              topic_ids:document.getElementById('topic_ids').value.trim(),
+              pushplus_token:document.getElementById('pp_token').value.trim()};
+  fetch('/api/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>r.json()).then(d=>alert(d.msg));
+}
+function testPush(){
+  fetch('/api/push/test',{method:'POST'}).then(r=>r.json()).then(d=>alert(d.msg));
+}
 setInterval(loadLog,4000);loadLog();
 </script></body></html>""" % (
             ("运行中" if _RUN["flag"] else ("补领中" if _RUN.get("claim_flag") else "空闲")),
@@ -1851,6 +1904,12 @@ setInterval(loadLog,4000);loadLog();
             _RUN["next"] or "—",
             _RUN.get("next_claim") or "—",
             rows,
+            _sel("none"),
+            _sel("wxpusher"),
+            _sel("pushplus"),
+            _esc(app_token_val),
+            _esc(topic_ids_val),
+            _esc(pp_token_val),
         )
         return html
 
@@ -1891,6 +1950,54 @@ setInterval(loadLog,4000);loadLog();
             cfg["accounts"] = [a for a in accts if a.get("phone") != b.get("phone")]
             save_config(cfg)
             return jsonify({"msg": "账号已删除"})
+
+    @app.route("/api/push", methods=["GET", "POST"])
+    def api_push():
+        cfg = load_config()
+        st = cfg.setdefault("settings", {})
+        push = st.get("push") or {}
+        if request.method == "GET":
+            wx = push.get("wxpusher") or {}
+            return jsonify({
+                "type": push.get("type", "none"),
+                "app_token": wx.get("app_token", ""),
+                "topic_ids": ",".join(str(x) for x in (wx.get("topic_ids") or [])),
+                "pushplus_token": push.get("pushplus_token", ""),
+            })
+        b = request.get_json(silent=True) or {}
+        ptype = str(b.get("type") or "none").strip().lower()
+        new_push = {"type": ptype}
+        if ptype == "wxpusher":
+            new_push["wxpusher"] = {
+                "app_token": (b.get("app_token") or "").strip(),
+                "topic_ids": _split_target_ids(b.get("topic_ids")),
+            }
+            old_pp = push.get("pushplus_token")
+            if old_pp:
+                new_push["pushplus_token"] = old_pp
+        elif ptype == "pushplus":
+            new_push["pushplus_token"] = (b.get("pushplus_token") or "").strip()
+        st["push"] = new_push
+        save_config(cfg)
+        # 让本进程立即生效（环境变量优先级仍高于配置）
+        if ptype != "wxpusher":
+            os.environ.pop("WXPUSHER_APP_TOKEN", None)
+            os.environ.pop("WXPUSHER_TOPIC_IDS", None)
+        return jsonify({"msg": "推送配置已保存"})
+
+    @app.route("/api/push/test", methods=["POST"])
+    def api_push_test():
+        # force=True：绕过时间窗口，专门用于面板里的"发一条测试消息"
+        ok = push_notify(
+            "酷我音乐 · 测试推送",
+            "【Web 面板测试】✅\n\n"
+            "收到这条说明推送配置正确。\n"
+            "以后每日金币统计会发到这里。\n\n"
+            "发送时间：" + time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        if ok:
+            return jsonify({"msg": "推送成功，请查看微信"})
+        return jsonify({"msg": "推送失败，请检查上方配置和下方日志（常见原因：appToken 与主题ID 不属于同一应用）"})
 
     @app.route("/api/logs")
     def api_logs():

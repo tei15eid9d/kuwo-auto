@@ -59,7 +59,20 @@ cp config.example.json config.json   # 填入你的手机号与密码
 每日金币统计会按**时间窗口**（12:00–12:15、23:55–23:59）自动推送，也可以用
 `FORCE_PUSH=1` 强制推送（适合测试）。
 
-### WxPusher（推荐，微信直接收）
+### 最简单：直接在 Web 面板里填
+
+打开面板（默认 `http://服务器IP:8080`），找到「**消息推送设置**」卡片：
+
+1. 推送方式选 `WxPusher（微信）`
+2. 填 **appToken**（`AT_` 开头）
+3. 填 **主题ID**（如 `48125`，多个用英文逗号分隔）
+4. 点「保存推送配置」
+5. 点「**发一条测试消息**」——微信收到就说明配好了
+
+面板保存会写进 `config.json`，**不会动你的账号**。测试按钮会绕过时间窗口立即发送。
+
+<details>
+<summary>也可以手写 config.json（点开）</summary>
 
 ```json
 {
@@ -86,6 +99,8 @@ cp config.example.json config.json   # 填入你的手机号与密码
 >
 > 如果你只有主题 ID 却没有它的 token，最省事的办法是改用**极简推送（SPT）**：
 > 微信扫码拿 SPT，消息只发给你自己，无需创建应用、也不用配对 token 与 topic。
+
+</details>
 
 ### PushPlus
 
