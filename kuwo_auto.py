@@ -32,7 +32,7 @@ import hashlib
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import urllib3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -1329,16 +1329,41 @@ def push_notify(title, content, force=False):
     return False
 
 
+def _bj_now():
+    """北京时间(UTC+8)。服务器时区常为 UTC, 直接用 datetime.now() 会让
+    推送窗口整体错位 8 小时(实测: 服务器显示 19:54 时北京已是 03:54), 故固定偏移。"""
+    return datetime.utcnow() + timedelta(hours=8)
+
+
+def get_push_mode():
+    """推送时机: always=每次运行完都推 / window=按时间窗口(默认)。
+    来源: 环境变量 PUSH_MODE > config.json settings.push.mode"""
+    env = (os.getenv('PUSH_MODE') or '').strip().lower()
+    if env in ('always', 'window'):
+        return env
+    try:
+        m = str(((load_config().get('settings') or {}).get('push') or {}).get('mode') or '').strip().lower()
+        if m in ('always', 'window'):
+            return m
+    except Exception:
+        pass
+    return 'window'
+
+
 def should_push():
-    """判断是否应该推送（12:00-12:15 和 23:55-23:59 窗口推送，或设置FORCE_PUSH=1强制推送）"""
-    # 支持强制推送：设置环境变量 FORCE_PUSH=1 即可忽略时间限制
+    """判断是否应该推送。
+    - PUSH_MODE=always / 面板选「每次运行都推送」→ 每次运行完都推
+    - 默认 window: 按北京时间 12:00-12:15 与 23:55-23:59
+    - FORCE_PUSH=1 → 无条件推"""
     if os.getenv('FORCE_PUSH', '') == '1':
         return True
-    now = datetime.now()
-    # 中午窗口: 12:00-12:15
+    if get_push_mode() == 'always':
+        return True
+    now = _bj_now()
+    # 中午窗口: 12:00-12:15 (北京时间)
     if now.hour == 12 and 0 <= now.minute <= 15:
         return True
-    # 晚间窗口: 23:55-23:59
+    # 晚间窗口: 23:55-23:59 (北京时间)
     if now.hour == 23 and now.minute >= 55:
         return True
     return False
@@ -1816,27 +1841,40 @@ if _HAVE_FLASK:
         push_cfg = (cfg.get("settings") or {}).get("push") or {}
         wx_cfg = push_cfg.get("wxpusher") or {}
         push_type = str(push_cfg.get("type") or "none").strip().lower()
+        push_mode = str(push_cfg.get("mode") or "window").strip().lower()
+        if push_mode not in ("window", "always"):
+            push_mode = "window"
         app_token_val = wx_cfg.get("app_token") or ""
         topic_ids_val = ",".join(str(x) for x in (wx_cfg.get("topic_ids") or []))
         pp_token_val = (push_cfg.get("pushplus_token") or os.getenv("PUSH_PLUS_TOKEN", ""))
         def _sel(t):
             return " selected" if push_type == t else ""
+        def _msel(t):
+            return " selected" if push_mode == t else ""
         def _esc(s):
             return (str(s).replace('&', '&amp;').replace('"', '&quot;')
                     .replace("'", '&#39;').replace('<', '&lt;').replace('>', '&gt;'))
         html = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>酷我音乐自动任务</title>
-<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:860px;margin:20px auto;padding:0 16px;color:#222}
-h1{font-size:20px}.card{background:#f7f8fa;border:1px solid #e5e7eb;border-radius:10px;padding:14px;margin:12px 0}
-button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;margin-right:8px}
-input{padding:6px 8px;border:1px solid #ccc;border-radius:6px;width:200px;margin:4px 6px 4px 0}
-pre{background:#0b1021;color:#d6e2ff;padding:12px;border-radius:8px;max-height:360px;overflow:auto;white-space:pre-wrap;font-size:12px}
+<style>*{box-sizing:border-box}
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:860px;margin:0 auto;padding:12px;color:#222}
+h1{font-size:18px;margin:10px 0}
+h3{margin:4px 0 10px;font-size:16px}
+.card{background:#f7f8fa;border:1px solid #e5e7eb;border-radius:12px;padding:14px;margin:10px 0}
+button{background:#2563eb;color:#fff;border:0;border-radius:10px;padding:11px 16px;cursor:pointer;margin:4px 8px 4px 0;font-size:15px;min-height:44px}
+button:active{background:#1d4ed8}
+input,select{padding:10px;border:1px solid #ccc;border-radius:8px;width:100%%;max-width:420px;margin:4px 0;font-size:16px}
+pre{background:#0b1021;color:#d6e2ff;padding:10px;border-radius:8px;max-height:240px;overflow:auto;white-space:pre-wrap;font-size:12px;margin:8px 0 0}
+.tblwrap{overflow-x:auto}
 table{width:100%%;border-collapse:collapse}td,th{border:1px solid #e5e7eb;padding:6px 8px;text-align:left}
-.hint{color:#666;font-size:13px}</style></head><body>
+.hint{color:#666;font-size:13px;line-height:1.6}
+.statusline{font-size:14px;line-height:1.7;word-break:break-all}
+@media(min-width:640px){body{padding:20px}h1{font-size:20px}pre{max-height:360px}}
+</style></head><body>
 <h1>酷我音乐自动任务 <span class="hint">(仅调用酷我官方接口)</span></h1>
 <div class="card">
-  <div>状态：%s ｜ 上次运行：%s ｜ 下次定时：%s ｜ 下次自动补领：%s</div>
+  <div class="statusline">状态：%s<br>上次运行：%s ｜ 下次定时：%s ｜ 下次自动补领：%s</div>
   <div style="margin-top:10px">
     <button onclick="runNow()">立即运行全部</button>
     <button onclick="location.reload()">刷新</button>
@@ -1844,31 +1882,40 @@ table{width:100%%;border-collapse:collapse}td,th{border:1px solid #e5e7eb;paddin
 </div>
 <div class="card">
   <h3>账号列表（仅手机号+密码）</h3>
-  <table><tr><th>手机号</th><th>密码</th></tr>%s</table>
+  <div class="tblwrap"><table><tr><th>手机号</th><th>密码</th></tr>%s</table></div>
   <h3 style="margin-top:14px">新增/修改账号</h3>
   <div>
-    <input id="phone" placeholder="手机号"><input id="password" placeholder="密码" type="password">
-    <button onclick="addAcct()">保存账号</button>
-    <button onclick="delAcct()">删除该手机号</button>
+    <input id="phone" placeholder="手机号" style="display:block"><input id="password" placeholder="密码" type="password" style="display:block">
+    <div style="margin-top:8px">
+      <button onclick="addAcct()">保存账号</button>
+      <button onclick="delAcct()">删除该手机号</button>
+    </div>
   </div>
   <div class="hint">格式同样支持环境变量 kwyy="手机号#密码&手机号2#密码2"</div>
 </div>
 <div class="card">
   <h3>消息推送设置</h3>
   <div style="margin:6px 0">
-    <span class="hint">推送方式：</span>
+    <span class="hint">推送方式：</span><br>
     <select id="push_type">
       <option value="none"%s>关闭</option>
       <option value="wxpusher"%s>WxPusher（微信）</option>
       <option value="pushplus"%s>PushPlus</option>
     </select>
   </div>
+  <div style="margin:6px 0">
+    <span class="hint">推送时机：</span><br>
+    <select id="push_mode">
+      <option value="window"%s>按时间窗口（北京时间 12:00 / 23:55 各一次）</option>
+      <option value="always"%s>每次运行完都推送</option>
+    </select>
+  </div>
   <div style="margin:6px 0"><span class="hint">WxPusher appToken（AT_ 开头）</span><br>
-    <input id="app_token" placeholder="AT_xxxxxxxx" style="width:340px" value="%s"></div>
+    <input id="app_token" placeholder="AT_xxxxxxxx" value="%s"></div>
   <div style="margin:6px 0"><span class="hint">主题ID（多个用英文逗号分隔，如 48125）</span><br>
-    <input id="topic_ids" placeholder="48125" style="width:340px" value="%s"></div>
+    <input id="topic_ids" placeholder="48125" value="%s"></div>
   <div style="margin:6px 0"><span class="hint">PushPlus token（选 PushPlus 时才用）</span><br>
-    <input id="pp_token" placeholder="PushPlus 的 token" style="width:340px" value="%s"></div>
+    <input id="pp_token" placeholder="PushPlus 的 token" value="%s"></div>
   <div style="margin-top:10px">
     <button onclick="savePush()">保存推送配置</button>
     <button onclick="testPush()">发一条测试消息</button>
@@ -1888,6 +1935,7 @@ fetch('/api/accounts',{method:'DELETE',headers:{'Content-Type':'application/json
 function loadLog(){fetch('/api/logs').then(r=>r.text()).then(t=>document.getElementById('log').textContent=t)}
 function savePush(){
   const body={type:document.getElementById('push_type').value,
+              mode:document.getElementById('push_mode').value,
               app_token:document.getElementById('app_token').value.trim(),
               topic_ids:document.getElementById('topic_ids').value.trim(),
               pushplus_token:document.getElementById('pp_token').value.trim()};
@@ -1907,6 +1955,8 @@ setInterval(loadLog,4000);loadLog();
             _sel("none"),
             _sel("wxpusher"),
             _sel("pushplus"),
+            _msel("window"),
+            _msel("always"),
             _esc(app_token_val),
             _esc(topic_ids_val),
             _esc(pp_token_val),
@@ -1960,13 +2010,17 @@ setInterval(loadLog,4000);loadLog();
             wx = push.get("wxpusher") or {}
             return jsonify({
                 "type": push.get("type", "none"),
+                "mode": push.get("mode", "window"),
                 "app_token": wx.get("app_token", ""),
                 "topic_ids": ",".join(str(x) for x in (wx.get("topic_ids") or [])),
                 "pushplus_token": push.get("pushplus_token", ""),
             })
         b = request.get_json(silent=True) or {}
         ptype = str(b.get("type") or "none").strip().lower()
-        new_push = {"type": ptype}
+        mode = str(b.get("mode") or "window").strip().lower()
+        if mode not in ("window", "always"):
+            mode = "window"
+        new_push = {"type": ptype, "mode": mode}
         if ptype == "wxpusher":
             new_push["wxpusher"] = {
                 "app_token": (b.get("app_token") or "").strip(),
