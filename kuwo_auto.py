@@ -1629,7 +1629,7 @@ def claim_loop():
 def run_claims_only(accounts=None, include_clock=False, collect_next=False):
     # 轻量补领轮: 开宝箱每轮都跑(按冷却自动领下一个);
     # 整点金币/时段宝箱仅在 include_clock=True(整点那轮)时跑, 避免无谓高频请求。
-    print('\n⏰ [自动补领] 开始: 开宝箱' + (' / 时段宝箱 / 整点领金币' if include_clock else ''))
+    print('\n⏰ [自动补领] 开始: 开宝箱 / 活动宝箱' + (' / 时段宝箱 / 整点领金币' if include_clock else ''))
     if accounts is None:
         accounts = get_accounts()
     if not accounts:
@@ -1658,6 +1658,21 @@ def run_claims_only(accounts=None, include_clock=False, collect_next=False):
                 next_times.append(nt)
             else:
                 print('    ⏭️ ' + str(box.get('description', '未到时间')))
+        # 新宝箱每轮的分支横即宝箱: 与开宝箱同走 newBoxFinish 接口,
+        # 若开宝箱刚触发冷却, 这里会同步失败, 需要跟着一起补领,
+        # 否则当天再也不会重试。
+        print('  【4.1】活动宝箱:')
+        act_box = run_activity_box_task(loginUid, loginSid, verbose=False)
+        if act_box.get('success'):
+            if act_box.get('done'):
+                print('    ⏭️ ' + str(act_box.get('description', '已完成')))
+            else:
+                print('    ✅ +' + str(act_box.get('obtain', 0)) + ' 金币')
+        else:
+            print('    ⏭️ ' + str(act_box.get('description', '未到时间')))
+        # 每轮补领后按'下次可领'精确休眠:
+        # - 解析到接口返回的倒计时 -> 卡点领;
+        # - 解析不到 -> 用 settings.box_interval 兜底重试(默认 600 秒)
         if include_clock:
             print('  【4.2】时段宝箱补领:')
             run_box_renew_tasks(loginUid, loginSid, gold_num=30, verbose=True)
