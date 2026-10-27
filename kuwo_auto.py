@@ -282,6 +282,25 @@ def login(username, password):
         print('❌ 登录异常: ' + str(e))
         return None
 
+def _parse_box_next_time(data):
+    """从开宝箱接口返回里尝试解析'下次可领时间戳'(毫秒)。
+    酷我可能返回 nextTime/countDown/leftTime 等字段, 也可能在 description 里写'X分钟'。
+    解析不到返回 None, 由补领循环用兜底间隔重试。"""
+    if not isinstance(data, dict):
+        data = {}
+    for key in ('nextTime', 'next', 'nextTimeMs', 'countDown', 'leftTime', 'leftTimeMs', 'time', 'timestamp'):
+        v = data.get(key)
+        if isinstance(v, (int, float)) and v > 0:
+            ts = int(v)
+            if ts < 10**12:  # 秒级 -> 毫秒
+                ts *= 1000
+            return ts
+    desc = str(data.get('description', ''))
+    m = re.search(r'(\d+)\s*分钟', desc)
+    if m:
+        return int(time.time() * 1000) + int(m.group(1)) * 60 * 1000
+    return None
+
 def open_treasure_box(loginUid, loginSid, appUid, encrypted_dev_id, gold_num=20, verbose=True):
     try:
         url = 'https://integralapi.kuwo.cn/api/v1/online/sign/new/newBoxFinish'
@@ -333,27 +352,28 @@ def open_treasure_box(loginUid, loginSid, appUid, encrypted_dev_id, gold_num=20,
             if result.get('code') == 200:
                 data = result.get('data', {})
                 status = data.get('status', 0)
+                next_time = _parse_box_next_time(data)
                 if status == 1:
                     obtain = data.get('obtain', 0)
                     extra_num = data.get('extraNum', 0)
                     if verbose:
                         print('✅ 开宝箱成功: 获得 ' + str(obtain) + ' 金币' + ((' (额外 ' + str(extra_num) + ' 金币)') if extra_num else ''))
-                    return {'success': True, 'obtain': obtain, 'extra_num': extra_num, 'description': '成功'}
+                    return {'success': True, 'obtain': obtain, 'extra_num': extra_num, 'description': '成功', 'next_time': next_time}
                 description = data.get('description', '未知错误')
                 if verbose:
                     print('⚠️  开宝箱失败: ' + description)
-                return {'success': False, 'obtain': 0, 'description': description}
+                return {'success': False, 'obtain': 0, 'description': description, 'next_time': next_time}
             error_msg = result.get('msg', '未知错误')
             if verbose:
                 print('❌ 开宝箱请求失败: ' + error_msg)
-            return {'success': False, 'obtain': 0, 'description': error_msg}
+            return {'success': False, 'obtain': 0, 'description': error_msg, 'next_time': None}
         if verbose:
             print('❌ 请求失败，状态码: ' + str(response.status_code))
-        return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code)}
+        return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code), 'next_time': None}
     except Exception as e:
         if verbose:
             print('❌ 开宝箱异常: ' + str(e))
-        return {'success': False, 'obtain': 0, 'description': str(e)}
+        return {'success': False, 'obtain': 0, 'description': str(e), 'next_time': None}
 
 def open_guanggao(loginUid, loginSid, appUid, encrypted_dev_id, gold_num, phone, verbose=True):
     try:
@@ -1685,32 +1705,62 @@ def claim_worker():
     _RUN["claim_flag"] = True
     try:
         with _cl.redirect_stdout(_LogCap()):
-            run_claims_only()
+            run_claims_only(include_clock=True)
     finally:
         _RUN["claim_flag"] = False
 
+# 开宝箱冷却兜底轮询间隔(秒)。酷我开宝箱约每 10 分钟可领一次;
+# 若接口能返回"下次可领时间"则按精确时间补领, 否则按此间隔重试。
+# 可在 config.json 的 settings.box_interval 覆盖(单位秒, 建议 >= 300)。
+def _box_poll_interval():
+    try:
+        iv = load_config().get('settings', {}).get('box_interval')
+        if isinstance(iv, int) and iv >= 60:
+            return iv
+    except Exception:
+        pass
+    return 600
+
 def claim_loop():
-    # 整点补领循环: 每小时第 3 分钟自动补跑领奖类任务
-    # (开宝箱/时段宝箱/整点领金币)。全量任务运行期间自动跳过, 避免冲突。
+    # 后台自动补领:
+    # - 开宝箱按"接口返回的倒计时精确 + 兜底间隔"循环, 冷却一结束就自动领下一个;
+    # - 整点那一轮顺带补领 整点金币/时段宝箱。
+    # 全量任务运行期间自动跳过, 避免冲突。
     while True:
         now = _dt.datetime.now()
-        target = now.replace(minute=3, second=0, microsecond=0)
-        if target <= now:
-            target = target + _dt.timedelta(hours=1)
+        accounts = get_accounts()
+        is_hour = (now.minute == 0)
+        next_times = []
+        if accounts and not (_RUN.get("flag") or _RUN.get("claim_flag")):
+            _RUN["claim_flag"] = True
+            try:
+                next_times = run_claims_only(accounts=accounts, include_clock=is_hour, collect_next=True) or []
+            finally:
+                _RUN["claim_flag"] = False
+        # 计算下次唤醒: 优先按接口返回的"下次可领时间"精确补领
+        now_ms = time.time() * 1000
+        if next_times:
+            sleep_s = max(5, (min(next_times) - now_ms) / 1000)
+        else:
+            sleep_s = _box_poll_interval()
+        # 保证整点一定会被纳入(用于整点金币/时段宝箱)
+        next_hour = (now + _dt.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        hour_s = max(1, (next_hour - now).total_seconds())
+        sleep_s = min(sleep_s, hour_s)
+        target = now + _dt.timedelta(seconds=sleep_s)
         _RUN["next_claim"] = target.strftime("%m-%d %H:%M")
-        time.sleep(max(1, (target - now).total_seconds()))
-        if _RUN.get("flag") or _RUN.get("claim_flag"):
-            continue
-        _th.Thread(target=claim_worker, daemon=True).start()
+        time.sleep(sleep_s)
 
-def run_claims_only(accounts=None):
-    # 轻量补领轮: 只做"到点领奖"类任务, 不重复刷签到/看视频等
-    print('\n⏰ [整点补领] 开始: 开宝箱 / 时段宝箱 / 整点领金币')
+def run_claims_only(accounts=None, include_clock=False, collect_next=False):
+    # 轻量补领轮: 开宝箱每轮都跑(按冷却自动领下一个);
+    # 整点金币/时段宝箱仅在 include_clock=True(整点那轮)时跑, 避免无谓高频请求。
+    print('\n⏰ [自动补领] 开始: 开宝箱' + (' / 时段宝箱 / 整点领金币' if include_clock else ''))
     if accounts is None:
         accounts = get_accounts()
     if not accounts:
         print('❌ 未读取到有效账号')
-        return
+        return [] if collect_next else None
+    next_times = []
     for i, account in enumerate(accounts, 1):
         phone = account['phone']
         password = account['password']
@@ -1726,19 +1776,27 @@ def run_claims_only(accounts=None):
         if box.get('success'):
             print('    ✅ +' + str(box.get('obtain', 0)) + ' 金币')
         else:
-            print('    ⏭️ ' + str(box.get('description', '未到时间')))
-        print('  【4.2】时段宝箱补领:')
-        run_box_renew_tasks(loginUid, loginSid, gold_num=30, verbose=True)
-        print('  【6】整点领金币:')
-        clock = clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, encrypted_phone, verbose=False)
-        if clock.get('success'):
-            if clock.get('done'):
-                print('    ⏭️ ' + str(clock.get('description', '已完成')))
+            nt = box.get('next_time')
+            if nt:
+                nxt = _dt.datetime.fromtimestamp(nt / 1000).strftime('%H:%M:%S')
+                print('    ⏳ 冷却中, 下次可领约 ' + nxt)
+                next_times.append(nt)
             else:
-                print('    ✅ +' + str(clock.get('obtain', 0)) + ' 金币')
-        else:
-            print('    ⏭️ ' + str(clock.get('description', '未到时间')))
-    print('\n✅ [整点补领] 本轮结束, 下一轮整点后自动再试')
+                print('    ⏭️ ' + str(box.get('description', '未到时间')))
+        if include_clock:
+            print('  【4.2】时段宝箱补领:')
+            run_box_renew_tasks(loginUid, loginSid, gold_num=30, verbose=True)
+            print('  【6】整点领金币:')
+            clock = clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, encrypted_phone, verbose=False)
+            if clock.get('success'):
+                if clock.get('done'):
+                    print('    ⏭️ ' + str(clock.get('description', '已完成')))
+                else:
+                    print('    ✅ +' + str(clock.get('obtain', 0)) + ' 金币')
+            else:
+                print('    ⏭️ ' + str(clock.get('description', '未到时间')))
+    print('\n✅ [自动补领] 本轮结束')
+    return next_times if collect_next else None
 
 # ---- Web 面板 ----
 try:
@@ -1770,7 +1828,7 @@ table{width:100%%;border-collapse:collapse}td,th{border:1px solid #e5e7eb;paddin
 .hint{color:#666;font-size:13px}</style></head><body>
 <h1>酷我音乐自动任务 <span class="hint">(仅调用酷我官方接口)</span></h1>
 <div class="card">
-  <div>状态：%s ｜ 上次运行：%s ｜ 下次定时：%s ｜ 下次整点补领：%s</div>
+  <div>状态：%s ｜ 上次运行：%s ｜ 下次定时：%s ｜ 下次自动补领：%s</div>
   <div style="margin-top:10px">
     <button onclick="runNow()">立即运行全部</button>
     <button onclick="location.reload()">刷新</button>

@@ -6,6 +6,7 @@
 ## 功能
 - **手机号 + 密码登录**：无需抓包，填手机号密码即可（内部走酷我官方 `login_kw` 接口）
 - 自动任务：签到、听歌、开宝箱、看广告、整点领、抽奖、免费听歌等
+- **开宝箱自动补领**：开宝箱约每 10 分钟冷却一次，后台会按倒计时自动领下一个；整点那一轮顺带补领整点金币/时段宝箱（轮询间隔可用 `settings.box_interval` 调整，单位秒，默认 600）
 - **多账号**：`config.json` 或环境变量 `kwyy`（格式 `手机号#密码`，多账号用 `&` 分隔）
 - **Web 面板**：浏览器里看状态、手动运行、增删账号、看日志
 - **内置定时**：默认每天 09:00 自动运行（可在 `config.json` 改时间）
@@ -20,7 +21,7 @@ cp config.example.json config.json   # 填入你的手机号与密码
 ## 配置（config.json）
 ```json
 {
-  "settings": { "schedule": "09:00", "web_host": "0.0.0.0", "web_port": 8080, "web_password": "", "push": { "type": "none" } },
+  "settings": { "schedule": "09:00", "box_interval": 600, "web_host": "0.0.0.0", "web_port": 8080, "web_password": "", "push": { "type": "none" } },
   "accounts": [ { "phone": "13800000000", "password": "你的酷我密码" } ]
 }
 ```

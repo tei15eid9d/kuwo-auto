@@ -1,6 +1,7 @@
 {
   "settings": {
     "schedule": "09:00",
+    "box_interval": 600,
     "web_host": "0.0.0.0",
     "web_port": 8080,
     "web_password": "",
