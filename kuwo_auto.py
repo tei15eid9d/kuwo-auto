@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-酷我音乐自动签到 / 金币任务 —— 去毒 · 服务器 · Web 面板版
+酷我音乐自动签到 / 每日任务 —— 去毒 · 服务器 · Web 面板版
 ========================================================
 本程序从你购买的加密 EXE 中还原出酷我官方任务逻辑，并做减法：
   ✓ 仅调用酷我官方接口（*.kuwo.cn），无任何第三方外发
   ✗ 已物理移除所有发往第三方平台的请求（原 EXE 中的上报地址）
-  ✗ 不实现自动提现（需手机验证码 + 资金风险，请到官方 App 自提）
+  ✗ 不实现自动提现（需手机验证码，请到官方 App 操作）
 
 功能对照原闲鱼 EXE：
-  登录 / 每日签到(看广告金币) / 创意视频·听歌 / 每日音乐 /
-  开宝箱 / 抽奖(免费·看视频) / 免费听歌开关 / 多账号 /
+  登录 / 每日签到 / 创意视频·听歌 / 每日音乐 /
+  开宝箱 / 抽奖 / 免费听歌开关 / 多账号 /
   内置定时任务(默认每天 09:00) / Web 面板 / 可选推送
 
 【网络行为（全部为酷我官方域名，绝无其他）】
   - ar.i.kuwo.cn           登录
-  - integralapi.kuwo.cn    签到 / 看广告 / 开宝箱 / 抽奖 / 每日音乐
+  - integralapi.kuwo.cn    签到 / 创意视频 / 开宝箱 / 抽奖 / 每日音乐
   - wapi.kuwo.cn           免费听歌开关
 
 【运行】
@@ -80,7 +80,7 @@ DEFAULT_SETTINGS = {
 # 运行时可变设置 / 账号
 SETTINGS = dict(DEFAULT_SETTINGS)
 ACCOUNTS = []
-HISTORY = {}          # phone -> {last_run, status, username, coins, tasks:[...]}
+HISTORY = {}          # phone -> {last_run, status, username, reward, tasks:[...]}
 run_lock = threading.Lock()
 stop_event = threading.Event()
 
@@ -281,7 +281,7 @@ def mark_done(phone):
 def run_account(acc, force=False):
     phone = acc.get("phone", "?")
     res = {"phone": phone, "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-           "status": "running", "username": "", "coins": 0, "tasks": [], "note": ""}
+           "status": "running", "username": "", "reward": 0, "tasks": [], "note": ""}
     if not force and already_done_today(phone):
         res["status"] = "skipped"
         res["note"] = "今日已执行（强制重跑请用 --force 或 Web 面板强制）"
