@@ -40,6 +40,12 @@ SIGN_BASE = 'https://integralapi.kuwo.cn/api/v1/online/sign'
 URL_NEW_USER_SIGN_LIST = SIGN_BASE + '/v1/earningSignIn/newUserSignList'
 URL_USER_ASSET = SIGN_BASE + '/v1/earningSignIn/earningUserSignList'
 URL_NEW_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/newDoListen'
+
+# 友情打卡官方通用验证ID(来自官方App抓包)
+FRIENDSHIP_VERIFICATION_ID = (
+    'BbDp7Z2XbYE1Rah8BlHtyfy5G2Mbvl+WOLHZwNDQF3Cr3aXE0PiayWxr'
+    '/JtzVw4h3cPC4+19DyipTZmdoBX7I6g=='
+)
 URL_EVERYDAY_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/everydaymusic/doListen'
 URL_BOX_RENEW = SIGN_BASE + '/new/boxRenew'
 URL_NEW_BOX_LIST = SIGN_BASE + '/new/newBoxList'
@@ -1144,6 +1150,99 @@ def run_missing_listen_tasks(loginUid, loginSid, appUid, encrypted_phone, verbos
     )
     return {'base': base_result, 'extra': extra_result}
 
+def claim_friendship_task(loginUid, loginSid, appUid, mobile_enc, task_type, gold, verification_id=FRIENDSHIP_VERIFICATION_ID):
+    # 友情打卡发奖请求(参数照抄官方App抓包)
+    params = {
+        'apiversion': '52',
+        'adverSpace': '',
+        'verifyStr': '',
+        'loginUid': str(loginUid),
+        'loginSid': str(loginSid),
+        'appUid': str(appUid),
+        'terminal': 'ar',
+        'from': task_type,
+        'taskId': '',
+        'goldNum': str(gold),
+        'baseTaskGold': '0',
+        'adverId': '',
+        'token': '',
+        'clickExtraGoldNum': '0',
+        'secondRewardFlag': '0',
+        'yyzdSecondRewardFlag': '0',
+        'surpriseType': '',
+        'verificationId': verification_id,
+        'mobile': mobile_enc,
+        'listenTime': '0',
+        'apiv': '10',
+        'unit': '',
+        'dynamicVer': '52',
+        'kver': '1',
+        'rewardType': '0',
+        'pFrom': 'friendshipCheckin',
+        'downloadAppReward': '0',
+    }
+    try:
+        response = requests.get(URL_NEW_DO_LISTEN, headers=build_common_headers(), params=params, timeout=30, verify=False)
+    except Exception as e:
+        return {'success': False, 'message': str(e)}
+    if response.status_code != 200:
+        return {'success': False, 'message': 'HTTP ' + str(response.status_code)}
+    try:
+        result = response.json()
+    except Exception:
+        return {'success': False, 'message': '响应非JSON'}
+    data = result.get('data') or {}
+    return {
+        'success': data.get('status') == 1,
+        'obtain': data.get('obtain'),
+        'message': data.get('description'),
+        'mesh': data.get('meshValidResult'),
+        'remain': data.get('remainScore'),
+    }
+
+def run_friendship_tasks(loginUid, loginSid, appUid, mobile_enc, verbose=True):
+    # 执行友情打卡的全部子任务(携程/腾讯地图/京东金融/快手极速版等, 自动跳过已领取)
+    info = fetch_sign_list(loginUid, loginSid, appUid, tag='友情打卡列表')
+    if not info.get('success'):
+        if verbose:
+            print('  ⚠️ 拉取任务列表失败')
+        return None
+    payload = info.get('data') or {}
+    subs = []
+    for item in payload.get('dataList') or []:
+        if isinstance(item, dict) and item.get('taskType') == 'friendshipCheckin':
+            subs = item.get('list') or []
+            break
+    if not subs:
+        if verbose:
+            print('  ⚠️ 该账号未开放友情打卡任务, 跳过')
+        return None
+    targets = [s for s in subs if s.get('status') != 1]
+    if not targets:
+        if verbose:
+            print('  ⏸️ 全部已领取, 跳过')
+        return {'success_count': 0, 'total_gold': 0, 'total': 0}
+    success_count = 0
+    total_gold = 0
+    for s in targets:
+        title = str(s.get('title'))
+        gold = s.get('goldNum')
+        res = claim_friendship_task(loginUid, loginSid, appUid, mobile_enc, s.get('taskType'), gold)
+        if res.get('success'):
+            success_count += 1
+            total_gold += to_int(res.get('obtain') or 0)
+            if verbose:
+                print('  ✅ ' + title + ' +' + str(res.get('obtain')) + ' 金币')
+        else:
+            if verbose:
+                msg = str(res.get('message'))
+                extra = (' | ' + str(res.get('mesh'))) if res.get('mesh') else ''
+                print('  ❌ ' + title + ': ' + msg + extra)
+        time.sleep(2)
+    if verbose:
+        print('  汇总: 成功 ' + str(success_count) + '/' + str(len(targets)) + ', 累计 ' + str(total_gold) + ' 金币')
+    return {'success_count': success_count, 'total_gold': total_gold, 'total': len(targets)}
+
 def run_sign_task_chain(loginUid, loginSid, appUid, encrypted_phone):
     sign_info = fetch_sign_list(loginUid, loginSid, appUid)
     if not sign_info['success']:
@@ -1511,6 +1610,11 @@ def run_all_accounts(accounts=None):
                 print('  汇总: 成功 ' + str(surprise_success_count) + '/5, 累计 ' + str(surprise_total_gold) + ' 金币')
                 print('\n【11】免费听歌时长任务:')
                 run_freemium_watch(loginUid, verbose=True)
+                print('\n【12】友情打卡:')
+                if os.getenv('KW_FRIENDSHIP', '1') == '0':
+                    print('  ⏭️ 已通过 KW_FRIENDSHIP=0 关闭')
+                else:
+                    run_friendship_tasks(loginUid, loginSid, appUid, encrypted_phone, verbose=True)
             
                 # 再次查询金币
                 final_asset = query_user_asset(loginUid, loginSid, appUid, verbose=False)
