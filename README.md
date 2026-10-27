@@ -94,11 +94,23 @@ cp config.example.json config.json   # 填入你的手机号与密码
 ```
 配合环境变量 `PUSH_PLUS_TOKEN=你的token`。
 
-### 关闭推送
+### 关不掉？/ 没收到推送？
 
-```json
-{ "settings": { "push": { "type": "none" } } }
+先跑自检，它会逐项告诉你卡在哪：
+
+```bash
+python3 push_test.py
 ```
+
+最常见的两个原因：
+
+1. **不在推送时间窗口**（最高发）——推送只在 `12:00-12:15` 和 `23:55-23:59` 触发，
+   其它时间跑脚本不会推送。想立刻推一次：
+   ```bash
+   FORCE_PUSH=1 python3 kuwo_auto.py --once
+   ```
+2. **`config.json` 里没配 push 段**——`git pull` 更新代码**不会**改动你本地的 `config.json`，
+   推送配置需要自己填一次。
 
 ## 运行
 ```bash
