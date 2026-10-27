@@ -46,11 +46,7 @@ FRIENDSHIP_VERIFICATION_ID = (
     'BbDp7Z2XbYE1Rah8BlHtyfy5G2Mbvl+WOLHZwNDQF3Cr3aXE0PiayWxr'
     '/JtzVw4h3cPC4+19DyipTZmdoBX7I6g=='
 )
-# 看视频拆红包官方通用验证ID(2026-09-16 抓包实证, 与友情打卡同源)
-VIDEO_AD_VERIFICATION_ID = (
-    'BbDp7Z2XbYE1Rah8BlHtyfy5G2Mbvl+WOLHZwNDQF3Cr3aXE0PiayWxr'
-    '/JtzVw4h3cPC4+19DyipTZmdoBX7I6g=='
-)
+# 看视频拆红包任务已移除(该任务需广告SDK凭证, 纯脚本无法构造, 详见README)
 URL_EVERYDAY_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/everydaymusic/doListen'
 URL_BOX_RENEW = SIGN_BASE + '/new/boxRenew'
 URL_NEW_BOX_LIST = SIGN_BASE + '/new/newBoxList'
@@ -244,11 +240,6 @@ def decrypt_phone(encrypted_phone):
     decrypted_data = unpad(aes.decrypt(encrypted_data), AES.block_size, style='pkcs7')
     return decrypted_data.decode('UTF-8')
 
-def generate_kuwo_token(device_id, timestamp):
-    raw_string = str(device_id) + 'KUWO_COMIC' + str(timestamp)
-    token = hashlib.md5(raw_string.encode('utf-8')).hexdigest()
-    return token
-
 def parse_account_item(account_str):
     parts = [x.strip() for x in account_str.split('#')]
     if len(parts) < 2:
@@ -402,80 +393,6 @@ def open_treasure_box(loginUid, loginSid, appUid, encrypted_dev_id, gold_num=20,
             print('❌ 开宝箱异常: ' + str(e))
         return {'success': False, 'obtain': 0, 'description': str(e), 'next_time': None}
 
-def open_guanggao(loginUid, loginSid, appUid, encrypted_dev_id, gold_num, phone, verify_str='', verbose=True):
-    try:
-        url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen'
-        params = {
-            'apiversion': API_VERSION,
-            'adverSpace': '20130101',
-            'verifyStr': verify_str,
-            'loginUid': loginUid,
-            'loginSid': loginSid,
-            'appUid': appUid,
-            'terminal': 'ar',
-            'from': 'videoadver',
-            'goldNum': str(gold_num),
-            'baseTaskGold': '0',
-            'token': verify_str,
-            'extraGoldNum': '0',
-            'clickExtraGoldNum': '0',
-            'secondRewardFlag': '0',
-            'yyzdSecondRewardFlag': '0',
-            'verificationId': VIDEO_AD_VERIFICATION_ID,
-            'mobile': phone,
-            'listenTime': '0',
-            'apiv': APIV_ACTION,
-            'unit': '',
-            'dynamicVer': DYNAMIC_VER,
-            'kver': '1',
-            'rewardType': '0',
-            'downloadAppReward': '0',
-        }
-        headers = {
-            'Host': 'integralapi.kuwo.cn',
-            'Connection': 'keep-alive',
-            'sec-ch-ua-platform': '"Android"',
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/134.0.6998.135 Mobile Safari/537.36/ kuwopage',
-            'Accept': 'application/json, text/plain, */*',
-            'sec-ch-ua': '"Chromium";v="134", "Not:A-Brand";v="24", "Android WebView";v="134"',
-            'sec-ch-ua-mobile': '?1',
-            'Origin': 'https://h5app.kuwo.cn',
-            'X-Requested-With': 'cn.kuwo.player',
-            'Sec-Fetch-Site': 'same-site',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Dest': 'empty',
-            'Referer': 'https://h5app.kuwo.cn/',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-        }
-        response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('code') == 200:
-                data = result.get('data', {})
-                status = data.get('status', 0)
-                if status == 1:
-                    obtain = data.get('obtain', 0)
-                    description = data.get('description', '成功')
-                    if verbose:
-                        print('✅ 广告观看成功: 获得 ' + str(obtain) + ' 金币 - ' + description)
-                    return {'success': True, 'obtain': obtain, 'description': description}
-                description = data.get('description', '未知错误')
-                if verbose:
-                    print('⚠️  广告观看失败: ' + description)
-                return {'success': False, 'obtain': 0, 'description': description}
-            error_msg = result.get('msg', '未知错误')
-            if verbose:
-                print('❌ 广告观看请求失败: ' + error_msg)
-            return {'success': False, 'obtain': 0, 'description': error_msg}
-        if verbose:
-            print('❌ 请求失败，状态码: ' + str(response.status_code))
-        return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code)}
-    except Exception as e:
-        if verbose:
-            print('❌ 广告观看异常: ' + str(e))
-        return {'success': False, 'obtain': 0, 'description': str(e)}
-
 def clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbose=True):
     clock_gold_num = 59
     try:
@@ -505,78 +422,6 @@ def clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbose=Tru
         {'from': 'clock', 'goldNum': str(clock_gold_num)},
         verbose=verbose,
     )
-
-def watch_dada_ad(loginUid, loginSid, appUid, encrypted_dev_id, phone):
-    timestamp = str(int(time.time() * 1000))
-    dynamic_token = generate_kuwo_token(encrypted_dev_id, timestamp)
-    url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen'
-    token_parts = '1,2,20130401,' + f'{loginUid},' + f'{dynamic_token}'
-    params = {
-        'apiversion': API_VERSION,
-        'adverSpace': '20130401',
-        'verifyStr': '',
-        'loginUid': loginUid,
-        'loginSid': loginSid,
-        'appUid': appUid,
-        'terminal': 'ar',
-        'from': 'videofix',
-        'taskId': '',
-        'goldNum': '50',
-        'baseTaskGold': '0',
-        'adverId': '',
-        'token': '',
-        'extraGoldNum': '0',
-        'clickExtraGoldNum': '0',
-        'secondRewardFlag': '0',
-        'yyzdSecondRewardFlag': '0',
-        'surpriseType': '',
-        'mobile': phone,
-        'apiv': '10',
-        'dynamicVer': DYNAMIC_VER,
-        'kver': '1',
-        'rewardType': '0',
-        'pFrom': '',
-    }
-    headers = {
-        'Host': 'integralapi.kuwo.cn',
-        'Connection': 'keep-alive',
-        'sec-ch-ua-platform': '"Android"',
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 Mobile Safari/537.36/ kuwopage',
-        'Accept': 'application/json, text/plain, */*',
-        'sec-ch-ua': '"Android WebView";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
-        'sec-ch-ua-mobile': '?1',
-        'Origin': 'https://h5app.kuwo.cn',
-        'X-Requested-With': 'cn.kuwo.player',
-        'Sec-Fetch-Site': 'same-site',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Dest': 'empty',
-        'Referer': 'https://h5app.kuwo.cn/',
-        'Accept-Encoding': 'gzip, deflate, br, zstd',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-    }
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('code') == 200:
-                data = result.get('data', {})
-                status = data.get('status', 0)
-                if status == 1:
-                    obtain = data.get('obtain', 0)
-                    description = data.get('description', '成功')
-                    print('✅ 广告观看成功: 获得 ' + str(obtain) + ' 金币 - ' + description)
-                    return {'success': True, 'obtain': obtain, 'description': description}
-                description = data.get('description', '未知错误')
-                print('⚠️  广告观看失败: ' + description)
-                return {'success': False, 'obtain': 0, 'description': description}
-            error_msg = result.get('msg', '未知错误')
-            print('❌ 广告观看请求失败: ' + error_msg)
-            return {'success': False, 'obtain': 0, 'description': error_msg}
-        print('❌ 请求失败，状态码: ' + str(response.status_code))
-        return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code)}
-    except Exception as e:
-        print('❌ 广告观看异常: ' + str(e))
-        return {'success': False, 'obtain': 0, 'description': str(e)}
 
 def lottery_draw(loginUid, loginSid, appUid, source=APP_SOURCE, lottery_type='free', verbose=True):
     try:
@@ -735,82 +580,6 @@ def run_box_renew_tasks(loginUid, loginSid, gold_num=30, verbose=True):
     if verbose:
         print('  汇总: 成功 ' + str(success_count) + '/' + str(total_count))
     return {'success_count': success_count, 'total_count': total_count}
-
-def watch_surprise_ad(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbose=True):
-    try:
-        url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen'
-        params = {
-            'apiversion': API_VERSION,
-            'adverSpace': '20130702',
-            'verifyStr': '',
-            'loginUid': loginUid,
-            'loginSid': loginSid,
-            'appUid': appUid,
-            'terminal': 'ar',
-            'from': 'surprise',
-            'taskId': '',
-            'goldNum': '68',
-            'baseTaskGold': '0',
-            'token': '',
-            'extraGoldNum': '0',
-            'clickExtraGoldNum': '0',
-            'secondRewardFlag': '0',
-            'yyzdSecondRewardFlag': '0',
-            'verificationId': VIDEO_AD_VERIFICATION_ID,
-            'surpriseType': '',
-            'mobile': phone,
-            'listenTime': '0',
-            'apiv': APIV_ACTION,
-            'unit': '',
-            'dynamicVer': DYNAMIC_VER,
-            'kver': '1',
-            'rewardType': '0',
-            'downloadAppReward': '0',
-        }
-        headers = {
-            'Host': 'integralapi.kuwo.cn',
-            'Connection': 'keep-alive',
-            'sec-ch-ua-platform': '"Android"',
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 4a Build/TQ3A.230805.001.S2; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 Mobile Safari/537.36/ kuwopage',
-            'Accept': 'application/json, text/plain, */*',
-            'sec-ch-ua': '"Android WebView";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
-            'sec-ch-ua-mobile': '?1',
-            'Origin': 'https://h5app.kuwo.cn',
-            'X-Requested-With': 'cn.kuwo.player',
-            'Sec-Fetch-Site': 'same-site',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Dest': 'empty',
-            'Referer': 'https://h5app.kuwo.cn/',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-        }
-        response = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
-        if response.status_code == 200:
-            result = response.json()
-            if result.get('code') == 200:
-                data = result.get('data', {})
-                status = data.get('status', 0)
-                if status == 1:
-                    obtain = data.get('obtain', 0)
-                    description = data.get('description', '成功')
-                    if verbose:
-                        print('✅ 惊喜广告观看成功: 获得 ' + str(obtain) + ' 金币 - ' + description)
-                    return {'success': True, 'obtain': obtain, 'description': description}
-                description = data.get('description', '未知错误')
-                if verbose:
-                    print('⚠️  惊喜广告观看失败: ' + description)
-                return {'success': False, 'obtain': 0, 'description': description}
-            error_msg = result.get('msg', '未知错误')
-            if verbose:
-                print('❌ 惊喜广告观看请求失败: ' + error_msg)
-            return {'success': False, 'obtain': 0, 'description': error_msg}
-        if verbose:
-            print('❌ 请求失败，状态码: ' + str(response.status_code))
-        return {'success': False, 'obtain': 0, 'description': 'HTTP ' + str(response.status_code)}
-    except Exception as e:
-        if verbose:
-            print('❌ 惊喜广告观看异常: ' + str(e))
-        return {'success': False, 'obtain': 0, 'description': str(e)}
 
 def build_common_headers():
     return {
@@ -1569,47 +1338,6 @@ def run_all_accounts(accounts=None):
                     print('  结果: ❌ ' + str(activity_box_result.get('description', '失败')))
                 print('\n【4.2】时段宝箱补领:')
                 run_box_renew_tasks(loginUid, loginSid, gold_num=30, verbose=True)
-                print('\n【5】看视频拆红包:')
-                # 该任务必须通过服务端「金币奖励校验」, 需要广告 SDK 颁发的凭证 verifyStr。
-                # 凭证来自 ad.tencentmusic.com 的 protobuf 预加载接口(私有协议+签名, 有实效),
-                # 纯脚本无法构造也难以重放 → 默认关闭, 避免每天白跑几十次无效请求。
-                if not get_video_ad_enabled():
-                    print('  ⏭️  已默认跳过（缺广告凭证必然失败，详见 README「看视频拆红包」一节）')
-                else:
-                    video_verify = get_video_ad_verify()
-                    if not video_verify:
-                        print('  ⏭️  已开启但未配置凭证 verifyStr，跳过')
-                        print('      请在 config.json 的 settings.video_verify 或环境变量 KWYY_VIDEO_VERIFY 填入凭证')
-                    else:
-                        ad_rounds = get_video_ad_rounds()
-                        ad_success_count = 0
-                        ad_total_gold = 0
-                        ad_fail_streak = 0
-                        for j in range(ad_rounds):
-                            ad_result = open_guanggao(
-                                loginUid, loginSid, appUid, encrypted_dev_id, 208,
-                                encrypted_phone, verify_str=video_verify, verbose=False,
-                            )
-                            round_idx = j + 1
-                            if ad_result.get('success'):
-                                obtain = to_int(ad_result.get('obtain') or 0)
-                                ad_success_count += 1
-                                ad_total_gold += obtain
-                                ad_fail_streak = 0
-                                print('  第' + str(round_idx) + '/' + str(ad_rounds) + '次 ✅ +' + str(obtain) + ' 金币')
-                            else:
-                                ad_fail_streak += 1
-                                print('  第' + str(round_idx) + '/' + str(ad_rounds) + '次 ❌ ' + str(ad_result.get('description')))
-                                if ad_result.get('mesh'):
-                                    print('      meshValidResult: ' + str(ad_result.get('mesh')))
-                                if is_done_like(ad_result.get('description')) or is_video_limit_like(ad_result.get('description')):
-                                    break
-                                # 连续失败3次说明凭证已失效/被拒, 别空跑
-                                if ad_fail_streak >= 3:
-                                    print('      ⏹ 连续失败3次, 凭证可能已失效, 停止')
-                                    break
-                            time.sleep(5)
-                        print('  汇总: 成功 ' + str(ad_success_count) + '/' + str(ad_rounds) + ', 累计 ' + str(ad_total_gold) + ' 金币')
                 print('\n【6】整点领金币:')
                 clock_result = clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, encrypted_phone, verbose=False)
                 if clock_result['success']:
@@ -1651,23 +1379,6 @@ def run_all_accounts(accounts=None):
                             break
                     time.sleep(5)
                 print('  汇总: 成功 ' + str(lottery_video_success) + '/9, 累计 ' + str(lottery_video_total_gold) + ' 金币')
-                print('\n【10】观看惊喜广告:')
-                surprise_success_count = 0
-                surprise_total_gold = 0
-                for j in range(5):
-                    surprise_result = watch_surprise_ad(loginUid, loginSid, appUid, encrypted_dev_id, encrypted_phone, verbose=False)
-                    round_idx = j + 1
-                    if surprise_result['success']:
-                        obtain = to_int(surprise_result.get('obtain') or 0)
-                        surprise_success_count += 1
-                        surprise_total_gold += obtain
-                        print('  第' + str(round_idx) + '/5次 ✅ +' + str(obtain) + ' 金币')
-                    else:
-                        print('  第' + str(round_idx) + '/5次 ❌ ' + str(surprise_result['description']))
-                        if is_done_like(surprise_result.get('description')):
-                            break
-                    time.sleep(5)
-                print('  汇总: 成功 ' + str(surprise_success_count) + '/5, 累计 ' + str(surprise_total_gold) + ' 金币')
                 print('\n【11】免费听歌时长任务:')
                 run_freemium_watch(loginUid, verbose=True)
                 print('\n【12】友情打卡:')
@@ -1842,44 +1553,6 @@ def get_accounts():
         if not any(x['phone'] == a['phone'] for x in accounts):
             accounts.append(a)
     return accounts
-
-def get_video_ad_enabled():
-    """看视频拆红包开关。
-    默认关闭: 该任务需要广告 SDK 凭证 verifyStr 才能通过服务端金币校验,
-    缺凭证时必然返回「金币奖励校验失败」, 硬刷只是浪费请求并增加风控风险。
-    开启方式: 环境变量 KUWO_VIDEO=1, 或 config.json settings.video_enabled=true
-    """
-    env_val = (os.getenv('KUWO_VIDEO') or '').strip()
-    if env_val != '':
-        return env_val == '1'
-    try:
-        return bool(load_config().get('settings', {}).get('video_enabled', False))
-    except Exception:
-        return False
-
-
-def get_video_ad_verify():
-    """看视频拆红包的广告凭证 verifyStr(由广告 SDK 颁发, 有时效)。
-    来源优先级: 环境变量 KWYY_VIDEO_VERIFY > config.json settings.video_verify
-    完整形如: 1,2,20130101,<loginUid>,<576字符凭证>
-    """
-    env_val = (os.getenv('KWYY_VIDEO_VERIFY') or '').strip()
-    if env_val:
-        return env_val
-    try:
-        return (load_config().get('settings', {}).get('video_verify') or '').strip()
-    except Exception:
-        return ''
-
-
-def get_video_ad_rounds():
-    """看视频拆红包轮次, 默认 5 轮(保守值, 避免短时间大量请求触发风控)"""
-    try:
-        val = int(os.getenv('KUWO_VIDEO_LOOP', '') or load_config().get('settings', {}).get('video_rounds', 5))
-        return max(1, min(val, 30))
-    except Exception:
-        return 5
-
 
 # ---- 运行日志捕获 ----
 _LOG = []
