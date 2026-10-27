@@ -26,7 +26,64 @@ def mask(v, keep=6):
     return s[:keep] + '*' * (len(s) - keep)
 
 
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+
+
+def do_init(token=None, topic=None):
+    """把推送配置写入 config.json，保留已有账号和其它设置。"""
+    import json
+    cfg = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            cfg = json.load(open(CONFIG_PATH, encoding='utf-8'))
+        except Exception as e:
+            print('⚠️  读取现有 config.json 失败(%s)，将新建' % e)
+            cfg = {}
+    settings = cfg.get('settings') or {}
+    accounts = cfg.get('accounts') or []
+    old_wx = ((settings.get('push') or {}).get('wxpusher') or {})
+
+    # 命令行参数优先，其次沿用已有值
+    app_token = (token or old_wx.get('app_token') or '').strip()
+    if topic:
+        topic_ids = k._split_target_ids(topic)
+    else:
+        topic_ids = k._split_target_ids(old_wx.get('topic_ids'))
+
+    settings['push'] = {
+        'type': 'wxpusher',
+        'wxpusher': {'app_token': app_token, 'topic_ids': topic_ids},
+    }
+    cfg['settings'] = settings
+    cfg['accounts'] = accounts
+    try:
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print('❌ 写入失败: ' + str(e))
+        return False
+
+    print('✅ 推送配置已写入 %s' % CONFIG_PATH)
+    print('   type      = wxpusher')
+    print('   app_token = %s' % (mask(app_token) if app_token else '(空) 请用 --token 指定'))
+    print('   topic_ids = %s' % (topic_ids if topic_ids else '(空) 请用 --topic 指定'))
+    print('   账号数保留 = %d 个（未被清空）' % len(accounts))
+    if not app_token or not topic_ids:
+        print('\n⚠️  appToken 或 topic_ids 为空，推送不会生效')
+        return False
+    return True
+
+
 def main():
+    if '--init' in sys.argv:
+        tk, tp = None, None
+        for i, arg in enumerate(sys.argv):
+            if arg == '--token' and i + 1 < len(sys.argv):
+                tk = sys.argv[i + 1]
+            if arg == '--topic' and i + 1 < len(sys.argv):
+                tp = sys.argv[i + 1]
+        do_init(tk, tp)
+        return
     print('=' * 62)
     print('WxPusher 推送自检')
     print('=' * 62)
