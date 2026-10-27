@@ -75,4 +75,50 @@ nohup python3 /opt/kuwo/kuwo_auto.py --server > /opt/kuwo/run.log 2>&1 &
 #   Restart=always
 ```
 
+## 【5】看视频拆红包 —— 为什么默认跳过，以及怎样才真能领
+
+这是唯一**默认关闭**的任务（注意：不是漏做，是做不了）。实测结论与根因：
+
+| 检查项 | 实测结果 |
+|---|---|
+| `ad.tencentmusic.com` 可达性 | IPv4 `101.226.142.110` / IPv6 均有，**TCP 443 可连通** |
+| TLS 握手 | ✅ 成功（腾讯深圳签发 `*.stream.qqmusic.qq.com`，DigiCert，有效期至 2027-03-02） |
+| HTTP 请求响应 | ❌ **全部超时**——对任何非 SDK 请求一律**静默挂起不返回**（4 组参数探测均超时） |
+
+即网关采用私有二进制协议（protobuf + SDK 签名），不是普通 HTTP 接口。
+
+**根因**：该任务要过服务端「金币奖励校验」，必须带 `verifyStr` / `token`，其格式为
+`1,2,20130101,<loginUid>,<576 字符凭证>`。这段凭证由腾讯音乐广告 SDK 从
+`ad.tencentmusic.com/maproxy/getPbCompressAd` 预加载缓存中颁发，**绑定时间戳与设备**。
+卖家源码注释也承认：「签名绑定时间，构造不出也重放不了」，因此他自己的软件同样默认跳过此任务。
+
+不传凭证时每轮必报错`金币奖励校验失败`，硬刷 30 轮只是浪费请求、徒增风控概率。
+
+### 若你仍想领，三条可行路径
+
+1. **抓包取证一次，填凭证用（可半自动）**
+   手机装抓包工具（安卓 HttpCanary / iOS Stream），进酷我「看视频拆红包」完整看一次广告，
+   把上报到 `integralapi.kuwo.cn/.../newDoListen` 的请求里 `verifyStr` 的完整值复制出来，
+   填到下面配置并把 `video_enabled` 设为 `true`。**注意凭证有时效**，过期需重抓。
+2. **在能跑真实 App 的环境里自动化（唯一真正全自动）**
+   服务器跑安卓容器（如 ReDroid / docker-android）+ Appium / uiautomator 驱动酷我 App，
+   让 App 自己走完广告流程拿到凭证。代价是部署重、占用高，且存在平台风控风险。
+3. **直接放弃（推荐）**
+   该任务单位收益虽高，但需要逆向私有协议 + 维护时效性凭证，投入产出比低。
+
+### 配置（开启后方可运行）
+
+```json
+{
+  "settings": {
+    "video_enabled": true,
+    "video_verify": "1,2,20130101,<你的loginUid>,<576字符凭证>",
+    "video_rounds": 5
+  }
+}
+```
+
+等价于环境变量：`KUWO_VIDEO=1`、`KWYY_VIDEO_VERIFY=<凭证>`、`KUWO_VIDEO_LOOP=5`。
+`video_rounds` 上限 30，**建议保持个位数**，避免短时间大量请求触发风控。
+
 > 仅供学习与技术研究，请在法律法规允许范围内使用，并自行承担相关风险。

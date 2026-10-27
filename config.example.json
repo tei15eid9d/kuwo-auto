@@ -5,7 +5,11 @@
     "web_host": "0.0.0.0",
     "web_port": 8080,
     "web_password": "",
-    "push": { "type": "none" }
+    "push": { "type": "none" },
+
+    "video_enabled": false,
+    "video_verify": "",
+    "video_rounds": 5
   },
   "accounts": [
     { "phone": "13800000000", "password": "你的酷我账号密码" }

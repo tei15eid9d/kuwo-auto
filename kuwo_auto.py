@@ -1570,30 +1570,46 @@ def run_all_accounts(accounts=None):
                 print('\n【4.2】时段宝箱补领:')
                 run_box_renew_tasks(loginUid, loginSid, gold_num=30, verbose=True)
                 print('\n【5】看视频拆红包:')
-                ad_success_count = 0
-                ad_total_gold = 0
-                ad_fail_streak = 0
-                for j in range(30):
-                    ad_result = open_guanggao(loginUid, loginSid, appUid, encrypted_dev_id, 208, encrypted_phone, verbose=False)
-                    round_idx = j + 1
-                    if ad_result['success']:
-                        obtain = to_int(ad_result.get('obtain') or 0)
-                        ad_success_count += 1
-                        ad_total_gold += obtain
-                        ad_fail_streak = 0
-                        print('  第' + str(round_idx) + '/30次 ✅ +' + str(obtain) + ' 金币')
+                # 该任务必须通过服务端「金币奖励校验」, 需要广告 SDK 颁发的凭证 verifyStr。
+                # 凭证来自 ad.tencentmusic.com 的 protobuf 预加载接口(私有协议+签名, 有实效),
+                # 纯脚本无法构造也难以重放 → 默认关闭, 避免每天白跑几十次无效请求。
+                if not get_video_ad_enabled():
+                    print('  ⏭️  已默认跳过（缺广告凭证必然失败，详见 README「看视频拆红包」一节）')
+                else:
+                    video_verify = get_video_ad_verify()
+                    if not video_verify:
+                        print('  ⏭️  已开启但未配置凭证 verifyStr，跳过')
+                        print('      请在 config.json 的 settings.video_verify 或环境变量 KWYY_VIDEO_VERIFY 填入凭证')
                     else:
-                        ad_fail_streak += 1
-                        print('  第' + str(round_idx) + '/30次 ❌ ' + str(ad_result['description']))
-                        if is_done_like(ad_result.get('description')):
-                            break
-                        # 熔断: 开局连续失败3次说明服务端校验不通过(如"金币奖励校验失败"),
-                        # 继续硬刷只会浪费请求并增加风控风险, 提前放弃该任务
-                        if ad_success_count == 0 and ad_fail_streak >= 3:
-                            print('  ⏭️  连续3次失败, 服务端奖励校验不通过, 跳过剩余轮次(该渠道今日可能已关闭)')
-                            break
-                    time.sleep(5)
-                print('  汇总: 成功 ' + str(ad_success_count) + '/30, 累计 ' + str(ad_total_gold) + ' 金币')
+                        ad_rounds = get_video_ad_rounds()
+                        ad_success_count = 0
+                        ad_total_gold = 0
+                        ad_fail_streak = 0
+                        for j in range(ad_rounds):
+                            ad_result = open_guanggao(
+                                loginUid, loginSid, appUid, encrypted_dev_id, 208,
+                                encrypted_phone, verify_str=video_verify, verbose=False,
+                            )
+                            round_idx = j + 1
+                            if ad_result.get('success'):
+                                obtain = to_int(ad_result.get('obtain') or 0)
+                                ad_success_count += 1
+                                ad_total_gold += obtain
+                                ad_fail_streak = 0
+                                print('  第' + str(round_idx) + '/' + str(ad_rounds) + '次 ✅ +' + str(obtain) + ' 金币')
+                            else:
+                                ad_fail_streak += 1
+                                print('  第' + str(round_idx) + '/' + str(ad_rounds) + '次 ❌ ' + str(ad_result.get('description')))
+                                if ad_result.get('mesh'):
+                                    print('      meshValidResult: ' + str(ad_result.get('mesh')))
+                                if is_done_like(ad_result.get('description')) or is_video_limit_like(ad_result.get('description')):
+                                    break
+                                # 连续失败3次说明凭证已失效/被拒, 别空跑
+                                if ad_fail_streak >= 3:
+                                    print('      ⏹ 连续失败3次, 凭证可能已失效, 停止')
+                                    break
+                            time.sleep(5)
+                        print('  汇总: 成功 ' + str(ad_success_count) + '/' + str(ad_rounds) + ', 累计 ' + str(ad_total_gold) + ' 金币')
                 print('\n【6】整点领金币:')
                 clock_result = clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, encrypted_phone, verbose=False)
                 if clock_result['success']:
@@ -1826,6 +1842,44 @@ def get_accounts():
         if not any(x['phone'] == a['phone'] for x in accounts):
             accounts.append(a)
     return accounts
+
+def get_video_ad_enabled():
+    """看视频拆红包开关。
+    默认关闭: 该任务需要广告 SDK 凭证 verifyStr 才能通过服务端金币校验,
+    缺凭证时必然返回「金币奖励校验失败」, 硬刷只是浪费请求并增加风控风险。
+    开启方式: 环境变量 KUWO_VIDEO=1, 或 config.json settings.video_enabled=true
+    """
+    env_val = (os.getenv('KUWO_VIDEO') or '').strip()
+    if env_val != '':
+        return env_val == '1'
+    try:
+        return bool(load_config().get('settings', {}).get('video_enabled', False))
+    except Exception:
+        return False
+
+
+def get_video_ad_verify():
+    """看视频拆红包的广告凭证 verifyStr(由广告 SDK 颁发, 有时效)。
+    来源优先级: 环境变量 KWYY_VIDEO_VERIFY > config.json settings.video_verify
+    完整形如: 1,2,20130101,<loginUid>,<576字符凭证>
+    """
+    env_val = (os.getenv('KWYY_VIDEO_VERIFY') or '').strip()
+    if env_val:
+        return env_val
+    try:
+        return (load_config().get('settings', {}).get('video_verify') or '').strip()
+    except Exception:
+        return ''
+
+
+def get_video_ad_rounds():
+    """看视频拆红包轮次, 默认 5 轮(保守值, 避免短时间大量请求触发风控)"""
+    try:
+        val = int(os.getenv('KUWO_VIDEO_LOOP', '') or load_config().get('settings', {}).get('video_rounds', 5))
+        return max(1, min(val, 30))
+    except Exception:
+        return 5
+
 
 # ---- 运行日志捕获 ----
 _LOG = []
