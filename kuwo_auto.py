@@ -1402,6 +1402,7 @@ def run_all_accounts(accounts=None):
                 print('\n【5】看视频拆红包:')
                 ad_success_count = 0
                 ad_total_gold = 0
+                ad_fail_streak = 0
                 for j in range(30):
                     ad_result = open_guanggao(loginUid, loginSid, appUid, encrypted_dev_id, 208, encrypted_phone, verbose=False)
                     round_idx = j + 1
@@ -1409,10 +1410,17 @@ def run_all_accounts(accounts=None):
                         obtain = to_int(ad_result.get('obtain') or 0)
                         ad_success_count += 1
                         ad_total_gold += obtain
+                        ad_fail_streak = 0
                         print('  第' + str(round_idx) + '/30次 ✅ +' + str(obtain) + ' 金币')
                     else:
+                        ad_fail_streak += 1
                         print('  第' + str(round_idx) + '/30次 ❌ ' + str(ad_result['description']))
                         if is_done_like(ad_result.get('description')):
+                            break
+                        # 熔断: 开局连续失败3次说明服务端校验不通过(如"金币奖励校验失败"),
+                        # 继续硬刷只会浪费请求并增加风控风险, 提前放弃该任务
+                        if ad_success_count == 0 and ad_fail_streak >= 3:
+                            print('  ⏭️  连续3次失败, 服务端奖励校验不通过, 跳过剩余轮次(该渠道今日可能已关闭)')
                             break
                     time.sleep(5)
                 print('  汇总: 成功 ' + str(ad_success_count) + '/30, 累计 ' + str(ad_total_gold) + ' 金币')
