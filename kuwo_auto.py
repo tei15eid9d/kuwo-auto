@@ -46,11 +46,32 @@ FRIENDSHIP_VERIFICATION_ID = (
     'BbDp7Z2XbYE1Rah8BlHtyfy5G2Mbvl+WOLHZwNDQF3Cr3aXE0PiayWxr'
     '/JtzVw4h3cPC4+19DyipTZmdoBX7I6g=='
 )
+# 看视频拆红包官方通用验证ID(2026-09-16 抓包实证, 与友情打卡同源)
+VIDEO_AD_VERIFICATION_ID = (
+    'BbDp7Z2XbYE1Rah8BlHtyfy5G2Mbvl+WOLHZwNDQF3Cr3aXE0PiayWxr'
+    '/JtzVw4h3cPC4+19DyipTZmdoBX7I6g=='
+)
 URL_EVERYDAY_DO_LISTEN = SIGN_BASE + '/v1/earningSignIn/everydaymusic/doListen'
 URL_BOX_RENEW = SIGN_BASE + '/new/boxRenew'
 URL_NEW_BOX_LIST = SIGN_BASE + '/new/newBoxList'
 URL_NEW_BOX_FINISH = SIGN_BASE + '/new/newBoxFinish'
 FREEMIUM_SWITCH_URL = 'https://wapi.kuwo.cn/openapi/v1/user/freemium/h5/switches'
+
+# 以下常量取自卖家 exe 内 2026-09-16/17 真实抓包（酷我音乐 12.2.2.0），替换了原先过期的旧值:
+#   apiversion / dynamicVer : 46 -> 52
+#   q36                     : 0302c7dc... -> 65561028073f439f925c75fd10001541a90b
+#   adApiversion            : 新增（59）
+#   version / source / prod : 12.0.4.1 -> 12.2.2.0
+# 若日后接口返回异常, 优先重新抓包核对这几个值.
+APP_VERSION = '12.2.2.0'
+APP_SOURCE = 'kwplayer_ar_12.2.2.0_40.apk'
+APP_PROD = 'kwplayer_ar_12.2.2.0'
+Q36 = '65561028073f439f925c75fd10001541a90b'
+API_VERSION = '52'
+DYNAMIC_VER = '52'
+AD_API_VERSION = '59'
+APIV_LIST = '11'
+APIV_ACTION = '10'
 
 DONE_KEYWORDS = [
     '今天已完成任务',
@@ -312,15 +333,15 @@ def open_treasure_box(loginUid, loginSid, appUid, encrypted_dev_id, gold_num=20,
         url = 'https://integralapi.kuwo.cn/api/v1/online/sign/new/newBoxFinish'
         r_value = random.random()
         params = {
-            'apiversion': '46',
+            'apiversion': API_VERSION,
             'loginUid': loginUid,
             'loginSid': loginSid,
             'devId': encrypted_dev_id,
             'jfencv': 'devId',
             'appUid': appUid,
-            'source': 'kwplayer_ar_12.0.4.1_newpcguanwangmobile.apk',
-            'version': 'kwplayer_ar_12.0.4.1',
-            'dynamicVer': '46',
+            'source': APP_SOURCE,
+            'version': APP_VERSION,
+            'dynamicVer': DYNAMIC_VER,
             'kver': '1',
             'verifyStr': '',
             'adverSpace': '',
@@ -381,36 +402,34 @@ def open_treasure_box(loginUid, loginSid, appUid, encrypted_dev_id, gold_num=20,
             print('❌ 开宝箱异常: ' + str(e))
         return {'success': False, 'obtain': 0, 'description': str(e), 'next_time': None}
 
-def open_guanggao(loginUid, loginSid, appUid, encrypted_dev_id, gold_num, phone, verbose=True):
+def open_guanggao(loginUid, loginSid, appUid, encrypted_dev_id, gold_num, phone, verify_str='', verbose=True):
     try:
         url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen'
         params = {
-            'apiversion': '46',
+            'apiversion': API_VERSION,
             'adverSpace': '20130101',
-            'verifyStr': '',
+            'verifyStr': verify_str,
             'loginUid': loginUid,
             'loginSid': loginSid,
             'appUid': appUid,
             'terminal': 'ar',
             'from': 'videoadver',
-            'taskId': '',
-            'goldNum': '208',
+            'goldNum': str(gold_num),
             'baseTaskGold': '0',
-            'adverId': '20130101-77797065644-101',
-            'token': '',
+            'token': verify_str,
+            'extraGoldNum': '0',
             'clickExtraGoldNum': '0',
             'secondRewardFlag': '0',
             'yyzdSecondRewardFlag': '0',
-            'verificationId': '',
-            'surpriseType': '',
+            'verificationId': VIDEO_AD_VERIFICATION_ID,
             'mobile': phone,
-            'listenTime': 0,
-            'apiv': 10,
+            'listenTime': '0',
+            'apiv': APIV_ACTION,
             'unit': '',
-            'dynamicVer': 46,
-            'kver': 1,
-            'rewardType': 0,
-            'pFrom': 'HTTP/1.1',
+            'dynamicVer': DYNAMIC_VER,
+            'kver': '1',
+            'rewardType': '0',
+            'downloadAppReward': '0',
         }
         headers = {
             'Host': 'integralapi.kuwo.cn',
@@ -493,7 +512,7 @@ def watch_dada_ad(loginUid, loginSid, appUid, encrypted_dev_id, phone):
     url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen'
     token_parts = '1,2,20130401,' + f'{loginUid},' + f'{dynamic_token}'
     params = {
-        'apiversion': '46',
+        'apiversion': API_VERSION,
         'adverSpace': '20130401',
         'verifyStr': '',
         'loginUid': loginUid,
@@ -513,7 +532,7 @@ def watch_dada_ad(loginUid, loginSid, appUid, encrypted_dev_id, phone):
         'surpriseType': '',
         'mobile': phone,
         'apiv': '10',
-        'dynamicVer': '46',
+        'dynamicVer': DYNAMIC_VER,
         'kver': '1',
         'rewardType': '0',
         'pFrom': '',
@@ -559,7 +578,7 @@ def watch_dada_ad(loginUid, loginSid, appUid, encrypted_dev_id, phone):
         print('❌ 广告观看异常: ' + str(e))
         return {'success': False, 'obtain': 0, 'description': str(e)}
 
-def lottery_draw(loginUid, loginSid, appUid, source='kwplayer_ar_12.0.4.1_newpcguanwangmobile.apk', lottery_type='free', verbose=True):
+def lottery_draw(loginUid, loginSid, appUid, source=APP_SOURCE, lottery_type='free', verbose=True):
     try:
         url = 'https://integralapi.kuwo.cn/api/v1/online/sign/loterry/getLucky'
         params = {'loginUid': loginUid, 'loginSid': loginSid, 'appUid': appUid, 'source': source, 'type': lottery_type}
@@ -721,7 +740,7 @@ def watch_surprise_ad(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbo
     try:
         url = 'https://integralapi.kuwo.cn/api/v1/online/sign/v1/earningSignIn/newDoListen'
         params = {
-            'apiversion': '46',
+            'apiversion': API_VERSION,
             'adverSpace': '20130702',
             'verifyStr': '',
             'loginUid': loginUid,
@@ -732,19 +751,21 @@ def watch_surprise_ad(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbo
             'taskId': '',
             'goldNum': '68',
             'baseTaskGold': '0',
-            'adverId': '20130702-77797065644-101',
             'token': '',
+            'extraGoldNum': '0',
             'clickExtraGoldNum': '0',
             'secondRewardFlag': '0',
             'yyzdSecondRewardFlag': '0',
-            'verificationId': '',
+            'verificationId': VIDEO_AD_VERIFICATION_ID,
             'surpriseType': '',
             'mobile': phone,
-            'apiv': '10',
-            'dynamicVer': '46',
+            'listenTime': '0',
+            'apiv': APIV_ACTION,
+            'unit': '',
+            'dynamicVer': DYNAMIC_VER,
             'kver': '1',
             'rewardType': '0',
-            'pFrom': '',
+            'downloadAppReward': '0',
         }
         headers = {
             'Host': 'integralapi.kuwo.cn',
@@ -890,7 +911,7 @@ def run_generic_task(title, url, params, verbose=True):
 
 def run_new_do_listen_task(title, loginUid, loginSid, appUid, phone, extra_params, verbose=True):
     params = {
-        'apiversion': '46',
+        'apiversion': API_VERSION,
         'adverSpace': '',
         'verifyStr': '',
         'loginUid': loginUid,
@@ -912,7 +933,7 @@ def run_new_do_listen_task(title, loginUid, loginSid, appUid, phone, extra_param
         'listenTime': 0,
         'apiv': '10',
         'unit': '',
-        'dynamicVer': '46',
+        'dynamicVer': DYNAMIC_VER,
         'kver': '1',
         'rewardType': '0',
         'pFrom': '',
@@ -965,8 +986,31 @@ def query_user_asset(loginUid, loginSid, appUid, verbose=True):
             print('❌ 资产查询异常: ' + str(e))
         return {'success': False, 'score': 0}
 
-def fetch_sign_list(loginUid, loginSid, appUid, extra_params=None, tag='签到列表'):
-    params = {'loginUid': loginUid, 'loginSid': loginSid, 'appUid': appUid}
+def fetch_sign_list(loginUid, loginSid, appUid, extra_params=None, tag='签到列表', dev_id=None):
+    # 参数按 2026-09 抓包补全(原先只带 3 个, 服务端一直宽容, 但补全后更接近真实请求)
+    params = {
+        'loginUid': loginUid,
+        'loginSid': loginSid,
+        'appUid': appUid,
+        'devId': dev_id or encrypt_devid(''.join([random.choice(string.digits) for _ in range(10)])),
+        'jfencv': 'devId',
+        'apiVer': '3',
+        'function': '1',
+        'isShowLaBa': '1',
+        'terminal': '1',
+        'platform': 'ar',
+        'version': APP_VERSION,
+        'source': APP_SOURCE,
+        'prod': APP_PROD,
+        'apiv': APIV_LIST,
+        'kver': '1',
+        'apiversion': API_VERSION,
+        'dynamicVer': DYNAMIC_VER,
+        'adApiversion': AD_API_VERSION,
+        'refresh': '0',
+        'q36': Q36,
+        't': str(random.random()),
+    }
     params.update(extra_params or {})
     try:
         response = requests.get(URL_NEW_USER_SIGN_LIST, headers=build_common_headers(), params=params, timeout=30, verify=False)
@@ -995,8 +1039,8 @@ def fetch_dynamic_task_payload(loginUid, loginSid, appUid, first_payload):
         loginSid,
         appUid,
         extra_params={
-            'dynamicVer': '39',
-            'q36': '0302c7dcfc6616225938b018100018b19319',
+            'dynamicVer': DYNAMIC_VER,
+            'q36': Q36,
         },
         tag='动态任务列表',
     )
@@ -1110,7 +1154,7 @@ def run_creative_dynamic_tasks(loginUid, loginSid, appUid, encrypted_phone, rewa
                 'adverSpace': '20130101',
                 'goldNum': str(gold),
                 'secondRewardFlag': '0',
-                'dynamicVer': '39',
+                'dynamicVer': DYNAMIC_VER,
             },
             verbose=verbose,
         )
@@ -1153,7 +1197,7 @@ def run_missing_listen_tasks(loginUid, loginSid, appUid, encrypted_phone, verbos
 def claim_friendship_task(loginUid, loginSid, appUid, mobile_enc, task_type, gold, verification_id=FRIENDSHIP_VERIFICATION_ID):
     # 友情打卡发奖请求(参数照抄官方App抓包)
     params = {
-        'apiversion': '52',
+        'apiversion': API_VERSION,
         'adverSpace': '',
         'verifyStr': '',
         'loginUid': str(loginUid),
@@ -1175,7 +1219,7 @@ def claim_friendship_task(loginUid, loginSid, appUid, mobile_enc, task_type, gol
         'listenTime': '0',
         'apiv': '10',
         'unit': '',
-        'dynamicVer': '52',
+        'dynamicVer': DYNAMIC_VER,
         'kver': '1',
         'rewardType': '0',
         'pFrom': 'friendshipCheckin',
