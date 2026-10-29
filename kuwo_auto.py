@@ -32,7 +32,7 @@ import hashlib
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import urllib3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -393,8 +393,32 @@ def open_treasure_box(loginUid, loginSid, appUid, encrypted_dev_id, gold_num=20,
             print('❌ 开宝箱异常: ' + str(e))
         return {'success': False, 'obtain': 0, 'description': str(e), 'next_time': None}
 
+CN_TZ = timezone(timedelta(hours=8))
+
+def resolve_clock_target(title, now_ts=None):
+    # 官方整点任务标题里通常写明可领时间(如 "7:00 打卡领金币")。
+    # 提取出来就能精确卡点, 不用每个整点都白试一次。
+    # 返回毫秒时间戳; 解析不到返回 None。
+    if not title:
+        return None
+    match = re.search(r'(\d{1,2}):(\d{2})', str(title))
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour >= 24 or minute >= 60:
+        return None
+    if now_ts is None:
+        now_ts = time.time()
+    local = datetime.fromtimestamp(now_ts, CN_TZ)
+    target = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target.timestamp() <= now_ts:
+        target = target + timedelta(days=1)
+    return int(target.timestamp() * 1000)
+
 def clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbose=True):
     clock_gold_num = 59
+    clock_title = ''
     try:
         task_payload = fetch_dynamic_task_payload(loginUid, loginSid, appUid, {})
         data_list = task_payload.get('dataList', [])
@@ -409,11 +433,12 @@ def clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbose=Tru
                 gold_num = to_int(item.get('goldNum'))
                 if gold_num > 0:
                     clock_gold_num = gold_num
+                    clock_title = str(item.get('title') or '')
                     break
     except Exception:
         pass
 
-    return run_new_do_listen_task(
+    result = run_new_do_listen_task(
         '整点领金币',
         loginUid,
         loginSid,
@@ -422,6 +447,10 @@ def clock_bonus(loginUid, loginSid, appUid, encrypted_dev_id, phone, verbose=Tru
         {'from': 'clock', 'goldNum': str(clock_gold_num)},
         verbose=verbose,
     )
+    if isinstance(result, dict):
+        # 标题里有"7:00"之类明确时间时, 直接把它作为下次可领时刻返回给补领循环
+        result['target_time'] = resolve_clock_target(clock_title)
+    return result
 
 def lottery_draw(loginUid, loginSid, appUid, source=APP_SOURCE, lottery_type='free', verbose=True):
     try:
@@ -480,6 +509,32 @@ def lottery_draw(loginUid, loginSid, appUid, source=APP_SOURCE, lottery_type='fr
             print('❌ 抽奖异常: ' + str(e))
         return {'success': False, 'message': str(e), 'data': {}}
 
+def read_countdown_seconds(value):
+    # 官方返回宝箱冷却倒计时, 字段 countdown。单位可能是秒也可能是毫秒。
+    # 保守判定: 超过一天秒数(86400)的值按毫秒折算; 折算后仍不合理则放弃(返回 None),
+    # 由补领循环用 box_interval 兜底, 避免拿错误单位算出荒谬的唤醒时间。
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text.isdigit():
+        return None
+    number = int(text)
+    if number == 0:
+        return 0
+    if number > 86400:
+        number = int(number / 1000)
+        # 宝箱冷却不可能到 24 小时, 出现这种值说明单位判错了, 宁可放弃走兜底
+        if number >= 86400 or number <= 0:
+            return None
+    return number
+
+def format_countdown_hint(seconds):
+    if not seconds:
+        return ''
+    if seconds < 60:
+        return ' (冷却中, 约 ' + str(seconds) + ' 秒后可领)'
+    return ' (冷却中, 约 ' + str(int(seconds / 60)) + ' 分钟后可领)'
+
 def run_activity_box_task(loginUid, loginSid, verbose=True):
     params = {
         'loginUid': loginUid,
@@ -505,10 +560,11 @@ def run_activity_box_task(loginUid, loginSid, verbose=True):
         if not isinstance(data, dict):
             data = {}
         gold_num = to_int(data.get('goldNum') or 0)
+        countdown = read_countdown_seconds(data.get('countdown'))
         if gold_num <= 0:
             if verbose:
-                print('⏭️ 活动宝箱: 暂无可领取金币')
-            return {'success': True, 'done': True, 'obtain': 0, 'description': '暂无可领取金币'}
+                print('⏭️ 活动宝箱: 暂无可领取金币' + format_countdown_hint(countdown))
+            return {'success': True, 'done': True, 'obtain': 0, 'description': '暂无可领取金币', 'countdown': countdown}
 
         finish_params = {
             'loginUid': loginUid,
@@ -526,12 +582,12 @@ def run_activity_box_task(loginUid, loginSid, verbose=True):
         if finish_result.get('code') == 200:
             if verbose:
                 print('✅ 活动宝箱成功: 获得 ' + str(gold_num) + ' 金币')
-            return {'success': True, 'obtain': gold_num, 'description': '成功'}
+            return {'success': True, 'obtain': gold_num, 'description': '成功', 'countdown': countdown}
 
         msg = str(finish_result.get('msg', '未知错误'))
         if verbose:
             print('⚠️  活动宝箱领取失败: ' + msg)
-        return {'success': False, 'obtain': 0, 'description': msg}
+        return {'success': False, 'obtain': 0, 'description': msg, 'countdown': countdown}
     except Exception as e:
         if verbose:
             print('❌ 活动宝箱异常: ' + str(e))
@@ -1012,6 +1068,133 @@ def claim_friendship_task(loginUid, loginSid, appUid, mobile_enc, task_type, gol
         'mesh': data.get('meshValidResult'),
         'remain': data.get('remainScore'),
     }
+
+def run_mini_tasks(loginUid, loginSid, appUid, verbose=True):
+    # 每日小任务: 听小说 / 收藏。金币数从官方任务列表动态读取, 不写死。
+    # 注: "听歌一首"(mobile) 已被【2】签到听歌链覆盖, 这里刻意跳过, 避免重复请求。
+    info = fetch_sign_list(loginUid, loginSid, appUid, tag='每日小任务列表')
+    if not info.get('success'):
+        if verbose:
+            print('  ⚠️ 拉取任务列表失败')
+        return {'success_count': 0, 'total_gold': 0, 'total': 0}
+    payload = info.get('data') or {}
+    rows = {}
+    for item in payload.get('dataList') or []:
+        if not isinstance(item, dict):
+            continue
+        task_type = str(item.get('taskType') or '')
+        if task_type in ('novel', 'collect'):
+            rows[task_type] = item
+    if not rows:
+        if verbose:
+            print('  ⏸️ 未开放听小说/收藏任务, 跳过')
+        return {'success_count': 0, 'total_gold': 0, 'total': 0}
+    success_count = 0
+    total_gold = 0
+    for kind, label in (('novel', '听小说'), ('collect', '收藏')):
+        row = rows.get(kind)
+        if not row:
+            continue
+        # 仅接受明确的完成标志, 不猜测 status 语义
+        if row.get('isCompleted') is True or row.get('isReceived') is True:
+            if verbose:
+                print('  ⏭️ ' + label + ': 今日已完成')
+            continue
+        gold = to_int(row.get('goldNum') or 0)
+        if gold <= 0:
+            if verbose:
+                print('  ⏭️ ' + label + ': 未返回可领金币, 跳过')
+            continue
+        result = run_everyday_do_listen_task(label, loginUid, loginSid, appUid,
+                                             {'from': kind, 'goldNum': str(gold)}, verbose=False)
+        if result.get('success') and not result.get('done'):
+            obtain = to_int(result.get('obtain') or 0)
+            success_count += 1
+            total_gold += obtain
+            if verbose:
+                print('  ✅ ' + label + ': +' + str(obtain) + ' 金币')
+        else:
+            if verbose:
+                print('  ⏭️ ' + label + ': ' + str(result.get('description') or '已完成'))
+        time.sleep(2)
+    return {'success_count': success_count, 'total_gold': total_gold, 'total': len(rows)}
+
+def _setting_int(key, default, low, high):
+    try:
+        raw = load_config().get('settings', {}).get(key)
+        if isinstance(raw, int) and low <= raw <= high:
+            return raw
+    except Exception:
+        pass
+    return default
+
+def _video_ad_times():
+    return _setting_int('video_ad_times', 10, 0, 50)
+
+def _surprise_times():
+    return _setting_int('surprise_times', 3, 0, 20)
+
+def _ad_interval():
+    return _setting_int('ad_interval', 5, 0, 300)
+
+def run_video_tasks(loginUid, loginSid, appUid, verbose=True):
+    # 视频红包 / 惊喜广告。
+    # 关键: 这里刻意走老接口 everydaymusic/doListen(只带 from + goldNum),
+    # 与之前失败的 newDoListen+verifyStr 路径不同, 不需要广告SDK凭证。
+    # 只有官方任务列表里确实存在该任务时才领取, 不存在直接跳过(不臆造)。
+    info = fetch_sign_list(loginUid, loginSid, appUid, tag='视频任务列表')
+    if not info.get('success'):
+        if verbose:
+            print('  ⚠️ 拉取任务列表失败')
+        return {'success_count': 0, 'total_gold': 0}
+    payload = info.get('data') or {}
+    rows = {}
+    for item in payload.get('dataList') or []:
+        if not isinstance(item, dict):
+            continue
+        task_type = str(item.get('taskType') or '')
+        if task_type in ('videoadver', 'surprise'):
+            rows[task_type] = item
+    if not rows:
+        if verbose:
+            print('  ⏸️ 该账号未开放视频红包/惊喜广告任务, 跳过')
+        return {'success_count': 0, 'total_gold': 0}
+    success_count = 0
+    total_gold = 0
+    for kind, label, fallback_gold, count in [
+        ('videoadver', '视频红包', 58, _video_ad_times()),
+        ('surprise', '惊喜广告', 68, _surprise_times()),
+    ]:
+        row = rows.get(kind)
+        if not row:
+            continue
+        if row.get('isCompleted') is True or row.get('isReceived') is True:
+            if verbose:
+                print('  ⏭️ ' + label + ': 今日已完成')
+            continue
+        gold = to_int(row.get('goldNum') or 0) or fallback_gold
+        for index in range(count):
+            title = label + ' 第' + str(index + 1) + '次'
+            result = run_everyday_do_listen_task(title, loginUid, loginSid, appUid,
+                                                 {'from': kind, 'goldNum': str(gold)}, verbose=False)
+            desc = str(result.get('description') or '')
+            if result.get('success') and not result.get('done'):
+                obtain = to_int(result.get('obtain') or 0)
+                success_count += 1
+                total_gold += obtain
+                if verbose:
+                    print('  ✅ ' + title + ': +' + str(obtain) + ' 金币')
+            else:
+                if verbose:
+                    print('  ⏭️ ' + label + ': ' + (desc or '领取失败'))
+                break
+            if is_video_limit_like(desc):
+                if verbose:
+                    print('  ⏹️ ' + label + ': 已达当日观看上限, 停止')
+                break
+            if index + 1 < count:
+                time.sleep(_ad_interval())
+    return {'success_count': success_count, 'total_gold': total_gold}
 
 def run_friendship_tasks(loginUid, loginSid, appUid, mobile_enc, verbose=True):
     # 执行友情打卡的全部子任务(携程/腾讯地图/京东金融/快手极速版等, 自动跳过已领取)
@@ -1517,6 +1700,13 @@ def run_all_accounts(accounts=None):
                     print('  ⏭️ 已通过 KW_FRIENDSHIP=0 关闭')
                 else:
                     run_friendship_tasks(loginUid, loginSid, appUid, encrypted_phone, verbose=True)
+                print('\n【13】每日小任务:')
+                run_mini_tasks(loginUid, loginSid, appUid, verbose=True)
+                print('\n【14】视频红包/惊喜广告:')
+                if os.getenv('KW_VIDEO_AD', '1') == '0':
+                    print('  ⏭️ 已通过 KW_VIDEO_AD=0 关闭')
+                else:
+                    run_video_tasks(loginUid, loginSid, appUid, verbose=True)
             
                 # 再次查询金币
                 final_asset = query_user_asset(loginUid, loginSid, appUid, verbose=False)
@@ -1796,11 +1986,21 @@ def run_claims_only(accounts=None, include_clock=False, collect_next=False):
         act_box = run_activity_box_task(loginUid, loginSid, verbose=False)
         if act_box.get('success'):
             if act_box.get('done'):
-                print('    ⏭️ ' + str(act_box.get('description', '已完成')))
+                print('    ⏭️ ' + str(act_box.get('description', '已完成')) + format_countdown_hint(act_box.get('countdown')))
             else:
                 print('    ✅ +' + str(act_box.get('obtain', 0)) + ' 金币')
         else:
             print('    ⏭️ ' + str(act_box.get('description', '未到时间')))
+        # 汇总该账号下次自动补领时刻(毫秒时间戳):
+        # 官方返回了冷却倒计时就卡点领; 没返回但刚领成功, 说明已进入下一轮冷却, 用配置间隔兜底
+        box_next = None
+        cd = act_box.get('countdown')
+        if isinstance(cd, int) and cd > 0:
+            box_next = int((time.time() + cd) * 1000)
+        elif box.get('success') or (act_box.get('success') and not act_box.get('done')):
+            box_next = int((time.time() + _box_poll_interval()) * 1000)
+        if box_next:
+            next_times.append(box_next)
         # 每轮补领后按'下次可领'精确休眠:
         # - 解析到接口返回的倒计时 -> 卡点领;
         # - 解析不到 -> 用 settings.box_interval 兜底重试(默认 600 秒)
@@ -1815,7 +2015,12 @@ def run_claims_only(accounts=None, include_clock=False, collect_next=False):
                 else:
                     print('    ✅ +' + str(clock.get('obtain', 0)) + ' 金币')
             else:
-                print('    ⏭️ ' + str(clock.get('description', '未到时间')))
+                ct = clock.get('target_time')
+                if ct:
+                    print('    ⏳ 未到领取时间, 已排入 ' + _dt.datetime.fromtimestamp(ct / 1000).strftime('%H:%M') + ' 自动领取')
+                    next_times.append(ct)
+                else:
+                    print('    ⏭️ ' + str(clock.get('description', '未到时间')))
     print('\n✅ [自动补领] 本轮结束')
     return next_times if collect_next else None
 
