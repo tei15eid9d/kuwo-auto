@@ -71,13 +71,16 @@ def main():
             if row.get('isCompleted') is True or row.get('isReceived') is True:
                 print('  %s: 今日已完成, 跳过' % label)
                 continue
-            gold = kw.to_int(row.get('goldNum') or 0)
+            # 实测: 必须提交固定金币数(视频红包 58 / 惊喜广告 68),
+            # 用任务列表里的 goldNum(累计总额)会被判「金币奖励区间校验失败」。
+            gold = kw.VIDEO_AD_GOLD if kind == 'videoadver' else kw.SURPRISE_AD_GOLD
             r = kw.run_everyday_do_listen_task(
                 label, loginUid, loginSid, appUid,
                 {'from': kind, 'goldNum': str(gold)}, verbose=False)
             desc = str(r.get('description') or '')
             if r.get('success') and not r.get('done'):
-                print('  ✅ %s: +%s 金币 (%s)' % (label, r.get('obtain'), desc))
+                # 成功时接口返回 obtain=0, 实际按 gold 入账
+                print('  ✅ %s: +%s 金币 (%s)' % (label, gold, desc))
             else:
                 print('  ⏭️ %s: %s' % (label, desc or '领取失败'))
 

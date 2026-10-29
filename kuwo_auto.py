@@ -1108,7 +1108,9 @@ def run_mini_tasks(loginUid, loginSid, appUid, verbose=True):
         result = run_everyday_do_listen_task(label, loginUid, loginSid, appUid,
                                              {'from': kind, 'goldNum': str(gold)}, verbose=False)
         if result.get('success') and not result.get('done'):
-            obtain = to_int(result.get('obtain') or 0)
+            # 老接口 everydaymusic/doListen 成功时 obtain 恒为 0, 但金币真实入账,
+            # 故以提交的金币数为准, 否则统计会记成 0。
+            obtain = to_int(result.get('obtain') or 0) or gold
             success_count += 1
             total_gold += obtain
             if verbose:
@@ -1128,19 +1130,47 @@ def _setting_int(key, default, low, high):
         pass
     return default
 
+# 视频红包 / 惊喜广告 —— 默认【关闭】
+#
+# 2026-10-29 真实账号复核算清: 本任务走的 everydaymusic/doListen 老接口,
+# 虽然成功时会给账号加约 58 金币, 但它操作的并不是 App 红包墙里的 40 个红包。
+# 核验方式(对官方任务列表 videoadver.list 做 status 盘点):
+#     list.length = 40,  status=1(已领) 恒为 0,  finishCount 恒为 0
+# 即无论发多少次请求, 红包墙一张都没被拆开。
+# 且该任务官方标记为 enableRiskCheck=1(服务端开启风控), 高频重复请求风险不可控,
+# 因此默认关闭(0 次)。想刷的自行在 config.json 里把 video_ad_times 改回次数。
 def _video_ad_times():
-    return _setting_int('video_ad_times', 10, 0, 50)
+    return _setting_int('video_ad_times', 0, 0, 50)
 
 def _surprise_times():
-    return _setting_int('surprise_times', 3, 0, 20)
+    # 同上: 惊喜广告同样默认关闭, 需使用者自行开启
+    return _setting_int('surprise_times', 0, 0, 20)
 
 def _ad_interval():
     return _setting_int('ad_interval', 5, 0, 300)
 
+
+# 视频红包 / 惊喜广告的「单次金币数」(2026-10-29 真实账号实测确认)
+# 不能用任务列表里的 goldNum: 那一项是累计总额(实测为 208), 直接提交会被服务端
+# 判为「金币奖励区间校验失败」。服务端实际只接受下列固定值。
+VIDEO_AD_GOLD = 58
+SURPRISE_AD_GOLD = 68
+
 def run_video_tasks(loginUid, loginSid, appUid, verbose=True):
     # 视频红包 / 惊喜广告。
-    # 关键: 这里刻意走老接口 everydaymusic/doListen(只带 from + goldNum),
-    # 与之前失败的 newDoListen+verifyStr 路径不同, 不需要广告SDK凭证。
+    #
+    # 2026-10-29 复核结论(重要): 本函数走的是老接口 everydaymusic/doListen
+    # (只带 from + goldNum, 不需要广告SDK凭证), 实测成功时会给账号加约 58 金币,
+    # 但它领的【不是】App 红包墙里的红包 — 官方列表 videoadver.list 里的 40 个
+    # status 始终为 0, finishCount 始终为 0, 说明红包墙一张都没拆开。
+    # 红包墙本身需要广告播放凭证, 与本路径无关。
+    # 因此本任务默认关闭(video_ad_times=0), 由使用者自行权衡是否开启。
+    if _video_ad_times() <= 0 and _surprise_times() <= 0:
+        if verbose:
+            print('  ⏸️ 视频红包/惊喜广告已关闭(默认)。')
+            print('     说明: 该路径并非领取App红包墙的40个红包, 且官方标记为风控任务,')
+            print('     如需开启请在 config.json 设置 video_ad_times(次数)/surprise_times。')
+        return {'success_count': 0, 'total_gold': 0, 'skipped': True}
     # 只有官方任务列表里确实存在该任务时才领取, 不存在直接跳过(不臆造)。
     info = fetch_sign_list(loginUid, loginSid, appUid, tag='视频任务列表')
     if not info.get('success'):
@@ -1161,9 +1191,9 @@ def run_video_tasks(loginUid, loginSid, appUid, verbose=True):
         return {'success_count': 0, 'total_gold': 0}
     success_count = 0
     total_gold = 0
-    for kind, label, fallback_gold, count in [
-        ('videoadver', '视频红包', 58, _video_ad_times()),
-        ('surprise', '惊喜广告', 68, _surprise_times()),
+    for kind, label, gold, count in [
+        ('videoadver', '视频红包', VIDEO_AD_GOLD, _video_ad_times()),
+        ('surprise', '惊喜广告', SURPRISE_AD_GOLD, _surprise_times()),
     ]:
         row = rows.get(kind)
         if not row:
@@ -1172,14 +1202,15 @@ def run_video_tasks(loginUid, loginSid, appUid, verbose=True):
             if verbose:
                 print('  ⏭️ ' + label + ': 今日已完成')
             continue
-        gold = to_int(row.get('goldNum') or 0) or fallback_gold
         for index in range(count):
             title = label + ' 第' + str(index + 1) + '次'
             result = run_everyday_do_listen_task(title, loginUid, loginSid, appUid,
                                                  {'from': kind, 'goldNum': str(gold)}, verbose=False)
             desc = str(result.get('description') or '')
             if result.get('success') and not result.get('done'):
-                obtain = to_int(result.get('obtain') or 0)
+                # 实测: 该接口成功时返回的 obtain 恒为 0, 但金币真实入账(按提交的 goldNum)。
+                # 所以对账时以提交的金币数为准, 否则统计会全部记成 0。
+                obtain = to_int(result.get('obtain') or 0) or gold
                 success_count += 1
                 total_gold += obtain
                 if verbose:
