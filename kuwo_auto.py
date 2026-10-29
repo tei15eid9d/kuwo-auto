@@ -710,6 +710,14 @@ def run_generic_task(title, url, params, verbose=True):
         data = result.get('data', {})
         if not isinstance(data, dict):
             data = {}
+        if not data:
+            # 服务端返回空 data = 请求根本没被受理(未做任何业务处理)。
+            # 2026-10-29 实测发现: 不存在的 from(如 notification) 会返回 {"code":200,"data":{}},
+            # 若沿用下面的 status 默认值 1 会被误判成"成功", 属于假阳性。
+            msg2 = '服务端空响应(请求未被受理)'
+            if verbose:
+                print('⏭️ ' + title + ': ' + msg2)
+            return {'success': False, 'obtain': 0, 'description': msg2, 'data': data, 'noop': True}
         status = data.get('status', 1)
         if isinstance(status, str) and status.isdigit():
             status = int(status)
@@ -1120,6 +1128,60 @@ def run_mini_tasks(loginUid, loginSid, appUid, verbose=True):
                 print('  ⏭️ ' + label + ': ' + str(result.get('description') or '已完成'))
         time.sleep(2)
     return {'success_count': success_count, 'total_gold': total_gold, 'total': len(rows)}
+
+
+# 2026-10-29 真实账号扫出的补漏项
+# 来源: 官方返回的 abClickVo.autoclicktask 一览 =
+#   sign, save, box, videoadver, listen, mobile, collect, novel, novelplus,
+#   notification, signlist, surprise
+# 对照已实现的任务后, 此前漏掉且真实可用的有两项:
+#   1) novelplus(小说加成): 实测每天一次 +18 金币, 真实到账(余额 37650 -> 37668)
+#   2) save(躺赚存钱罐)   : 20:00 前返回「未到领取时间, 请稍后再试」, 说明接口有效,
+#                          官方文案为「每天 20:00 即可提取入账」, 属定点任务
+# 另: notification 虽在名单里, 但实测返回空 data(未受理), 属假阳性, 不接入。
+NOVELPLUS_GOLD = 18
+
+
+def run_extra_tasks(loginUid, loginSid, appUid, phone, verbose=True):
+    """小说加成(novelplus) + 躺赚存钱罐(save), 两者都走 newDoListen"""
+    success_count = 0
+    total_gold = 0
+
+    # --- novelplus: 每天一次 ---
+    result = run_new_do_listen_task(
+        '小说加成', loginUid, loginSid, appUid, phone,
+        {'from': 'novelplus', 'goldNum': str(NOVELPLUS_GOLD)}, verbose=False)
+    desc = str(result.get('description') or '')
+    if result.get('success') and not result.get('done'):
+        obtain = to_int(result.get('obtain') or 0) or NOVELPLUS_GOLD
+        success_count += 1
+        total_gold += obtain
+        if verbose:
+            print('  ✅ 小说加成: +' + str(obtain) + ' 金币')
+    else:
+        if verbose:
+            print('  ⏭️ 小说加成: ' + (desc or '今日已完成'))
+    time.sleep(2)
+
+    # --- save: 躺赚存钱罐, 官方为每天 20:00 后可提取 ---
+    save_gold = _setting_int('save_gold', 0, 0, 100000)
+    extra = {'from': 'save'}
+    if save_gold > 0:
+        extra['goldNum'] = str(save_gold)
+    sres = run_new_do_listen_task('躺赚存钱罐', loginUid, loginSid, appUid, phone,
+                                  extra, verbose=False)
+    sdesc = str(sres.get('description') or '')
+    if sres.get('success') and not sres.get('done'):
+        obtain = to_int(sres.get('obtain') or 0)
+        success_count += 1
+        total_gold += obtain
+        if verbose:
+            print('  ✅ 躺赚存钱罐: +' + str(obtain) + ' 金币')
+    else:
+        if verbose:
+            print('  ⏭️ 躺赚存钱罐: ' + (sdesc or '未到领取时间'))
+    return {'success_count': success_count, 'total_gold': total_gold}
+
 
 def _setting_int(key, default, low, high):
     try:
@@ -1738,6 +1800,11 @@ def run_all_accounts(accounts=None):
                     print('  ⏭️ 已通过 KW_VIDEO_AD=0 关闭')
                 else:
                     run_video_tasks(loginUid, loginSid, appUid, verbose=True)
+                print('\n【15】小说加成 / 躺赚存钱罐:')
+                if os.getenv('KW_EXTRA_TASK', '1') == '0':
+                    print('  ⏭️ 已通过 KW_EXTRA_TASK=0 关闭')
+                else:
+                    run_extra_tasks(loginUid, loginSid, appUid, encrypted_phone, verbose=True)
             
                 # 再次查询金币
                 final_asset = query_user_asset(loginUid, loginSid, appUid, verbose=False)
@@ -2052,6 +2119,20 @@ def run_claims_only(accounts=None, include_clock=False, collect_next=False):
                     next_times.append(ct)
                 else:
                     print('    ⏭️ ' + str(clock.get('description', '未到时间')))
+            # 躺赚存钱罐(save): 官方为每天 20:00 后才可提取。
+            # 补领循环每小时整点会醒一轮, 因此放在整点轮里,
+            # 到 20:00 即可自动入库(此前非 20:00 会返回"未到领取时间")。
+            print('  【15】躺赚存钱罐补领:')
+            save_gold = _setting_int('save_gold', 0, 0, 100000)
+            sextra = {'from': 'save'}
+            if save_gold > 0:
+                sextra['goldNum'] = str(save_gold)
+            sv = run_new_do_listen_task('躺赚存钱罐', loginUid, loginSid, appUid,
+                                        encrypted_phone, sextra, verbose=False)
+            if sv.get('success') and not sv.get('done'):
+                print('    ✅ +' + str(sv.get('obtain', 0)) + ' 金币')
+            else:
+                print('    ⏭️ ' + str(sv.get('description', '未到领取时间')))
     print('\n✅ [自动补领] 本轮结束')
     return next_times if collect_next else None
 

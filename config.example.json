@@ -5,6 +5,7 @@
     "video_ad_times": 0,
     "surprise_times": 0,
     "ad_interval": 5,
+    "save_gold": 0,
     "web_host": "0.0.0.0",
     "web_port": 8080,
     "web_password": "",
